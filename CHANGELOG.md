@@ -16,6 +16,20 @@ bumps may include breaking changes).
   to run inside Windows; apps sync automatically once the guest comes up.
 - `dinghy serve-setup --json` machine-readable mode backing the GUI flow.
 - The menu-bar app's Info.plist version now tracks the dinghy `VERSION`.
+- Launches now check guest clock drift first and wait for it to resync
+  instead of failing with an RDP security error (0x1807).
+
+### Changed
+
+- Guest setup tightens time sync: NTP poll every 60s with unlimited step
+  correction (was a 15-minute resync task), shrinking the post-pause window
+  where CredSSP rejects connections with 0x1807. Re-run the setup script in
+  the VM to apply.
+
+### Fixed
+
+- macOS notifications were still titled "WinBoat"; retitled to WinDinghy
+  (also the Setup Check dialog and remaining user-facing CLI text).
 
 ## [0.1.0] - 2026-08-13
 

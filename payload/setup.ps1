@@ -122,11 +122,19 @@ Ok "Edge background mode disabled"
 
 Step "Configuring aggressive time sync"
 cmd /c 'w32tm /config /manualpeerlist:"time.windows.com,0x9 time.apple.com,0x9" /syncfromflags:manual /update >nul 2>&1'
+# 0x9 peers use SpecialPollInterval; default 1h leaves the clock minutes off
+# after a VM pause until the next poll, which breaks CredSSP (RDP 0x1807).
+# Poll every 60s and allow unlimited step corrections so any drift heals fast.
+$w32 = "HKLM:\SYSTEM\CurrentControlSet\Services\W32Time"
+Set-ItemProperty -Path "$w32\TimeProviders\NtpClient" -Name SpecialPollInterval -Value 60 -Type DWord
+Set-ItemProperty -Path "$w32\Config" -Name MaxPosPhaseCorrection -Value 0xFFFFFFFF -Type DWord
+Set-ItemProperty -Path "$w32\Config" -Name MaxNegPhaseCorrection -Value 0xFFFFFFFF -Type DWord
 cmd /c 'net stop w32time >nul 2>&1'
 cmd /c 'net start w32time >nul 2>&1'
 cmd /c 'w32tm /resync /force >nul 2>&1'
-cmd /c 'schtasks /create /f /tn "WinBoatTimeSync" /sc minute /mo 15 /ru SYSTEM /tr "w32tm /resync" >nul 2>&1'
-Ok "Time sync every 15 minutes"
+# Belt-and-braces resync task in case w32time stalls
+cmd /c 'schtasks /create /f /tn "WinBoatTimeSync" /sc minute /mo 5 /ru SYSTEM /tr "w32tm /resync" >nul 2>&1'
+Ok "Time sync: NTP poll every 60s + resync task every 5 minutes"
 $ErrorActionPreference = "Stop"
 
 # --- 5. Health check ---

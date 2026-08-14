@@ -1,5 +1,5 @@
 // WinDinghy menu-bar app: ambient VM status + app picker + sync + setup check.
-// Built by build.sh into ~/Applications/WinBoat.app (LSUIElement, no dock icon).
+// Built by build.sh into ~/Applications/WinDinghy.app (LSUIElement, no dock icon).
 import AppKit
 import ServiceManagement
 
@@ -727,7 +727,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
 
             DispatchQueue.main.async {
                 let alert = NSAlert()
-                alert.messageText = advice.isEmpty ? "WinBoat is fully set up" : "WinBoat setup needs attention"
+                alert.messageText = advice.isEmpty ? "WinDinghy is fully set up" : "WinDinghy setup needs attention"
                 var body = lines.joined(separator: "\n")
                 if !advice.isEmpty {
                     body += "\n\nWhat to do:\n" + advice.joined(separator: "\n")
@@ -779,7 +779,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     func notify(_ msg: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "display notification \(jsonEscape(msg)) with title \"WinBoat\""]
+        p.arguments = ["-e", "display notification \(jsonEscape(msg)) with title \"WinDinghy\""]
         try? p.run()
     }
 

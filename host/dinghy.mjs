@@ -7,7 +7,7 @@
 // Commands:
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
 //   dinghy status               guest health / version / metrics
-//   dinghy sync                 fetch app list, (re)generate ~/Applications/WinBoat/*.app
+//   dinghy sync                 fetch app list, (re)generate ~/Applications/WinDinghy/*.app
 //   dinghy launch <name>        launch a synced app
 //   dinghy desktop              open a full Windows desktop session
 //   dinghy config [key value]   show or set config (host, username, appsDir, ...)
@@ -343,7 +343,7 @@ async function cmdSync(cfg) {
 
 function notify(msg) {
     // Launchers run without a terminal; surface progress as notifications.
-    spawnSync("osascript", ["-e", `display notification ${JSON.stringify(msg)} with title "WinBoat"`], { stdio: "ignore" });
+    spawnSync("osascript", ["-e", `display notification ${JSON.stringify(msg)} with title "WinDinghy"`], { stdio: "ignore" });
 }
 
 async function guestAlive(cfg, timeoutMs = 2500) {
@@ -421,6 +421,15 @@ async function ensureGuest(cfg, interactive) {
     return false;
 }
 
+// Guest clock drift after VM pauses breaks CredSSP with opaque security
+// errors (0x1807). Returns skew in seconds, or 0 if it can't be measured.
+async function guestClockSkew(cfg) {
+    try {
+        const res = await fetch(`${apiBase(cfg)}/health`, { signal: AbortSignal.timeout(3000) });
+        return Math.abs(Date.now() - new Date(res.headers.get("date")).getTime()) / 1000;
+    } catch { return 0; }
+}
+
 async function cmdOpenRdp(cfg, bundleDir) {
     const metaPath = path.join(bundleDir, "app.json");
     const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
@@ -428,6 +437,21 @@ async function cmdOpenRdp(cfg, bundleDir) {
     if (!ok) {
         notify(`Can't reach the Windows VM. Start it in UTM, then try again.`);
         process.exit(1);
+    }
+    // Hold the launch while a drifted clock heals (guest resyncs every 60s)
+    // instead of letting the connection fail.
+    let skew = await guestClockSkew(cfg);
+    if (skew > 120) {
+        notify(`Windows clock is off by ${Math.round(skew)}s — waiting for it to resync…`);
+        const deadline = Date.now() + 75_000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 5000));
+            skew = await guestClockSkew(cfg);
+            if (skew <= 120) break;
+        }
+        if (skew > 120) {
+            notify(`Clock still drifted — the connection may fail with a security error (0x1807). Restart the VM, or re-run "Set Up Windows VM…" to install the faster time sync.`);
+        }
     }
     const rdp = meta.desktop ? rdpForDesktop(cfg) : rdpForApp(cfg, meta);
     const rdpPath = path.join(bundleDir, rdpFileName(meta.desktop ? "Windows Desktop" : meta.Name));
@@ -611,7 +635,7 @@ try {
 Usage:
   dinghy serve-setup          serve guest payload; prints the one-liner to run in the VM
   dinghy status               guest health / metrics / RDP reachability
-  dinghy sync                 generate ~/Applications/WinBoat/*.app launchers
+  dinghy sync                 generate ~/Applications/WinDinghy/*.app launchers
   dinghy launch "<name>"      launch a Windows app
   dinghy desktop              full Windows desktop session
   dinghy doctor               check mac-side + guest-side requirements
