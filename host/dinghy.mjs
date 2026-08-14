@@ -19,6 +19,10 @@ import http from "node:http";
 import { execFileSync, spawnSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+// Single source of truth for the WinDinghy version. Release: bump this,
+// move CHANGELOG "Unreleased" entries under the new version, tag vX.Y.Z.
+const VERSION = "0.1.0";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PAYLOAD_DIR = path.join(PROJECT_ROOT, "payload");
@@ -588,8 +592,11 @@ try {
         case "open-rdp":    await cmdOpenRdp(cfg, rest[0]); break;
         case "doctor":      await cmdDoctor(cfg); break;
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
+        case "version":
+        case "--version":
+        case "-v":          console.log(`dinghy ${VERSION}`); break;
         default:
-            console.log(`dinghy — WinDinghy
+            console.log(`dinghy — WinDinghy ${VERSION}
 
 Usage:
   dinghy serve-setup          serve guest payload; prints the one-liner to run in the VM
@@ -598,7 +605,8 @@ Usage:
   dinghy launch "<name>"      launch a Windows app
   dinghy desktop              full Windows desktop session
   dinghy doctor               check mac-side + guest-side requirements
-  dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)`);
+  dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)
+  dinghy version              print the WinDinghy version`);
     }
 } catch (e) {
     console.error(`Error: ${e.message}`);
