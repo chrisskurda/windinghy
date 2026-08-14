@@ -19,3 +19,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+Third-party components:
+
+* payload/server/ contains the WinBoat Guest Server, built unmodified from
+  https://github.com/TibixDev/winboat (MIT License, Copyright (c) 2026
+  TibixDev) — see LICENSE.winboat.
+* payload/nssm.exe is NSSM (https://nssm.cc), used as the service wrapper;
+  NSSM is public-domain software.
