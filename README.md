@@ -1,7 +1,7 @@
 # WinDinghy
 
 Run Windows apps from a UTM virtual machine as if they were native macOS apps —
-each one gets a real `.app` in `~/Applications/WinBoat` (Spotlight, Dock, Finder)
+each one gets a real `.app` in `~/Applications/WinDinghy` (Spotlight, Dock, Finder)
 that opens as its own window via RDP RemoteApp.
 
 This reuses [WinBoat](https://github.com/TibixDev/winboat)'s guest agent (MIT,
@@ -13,13 +13,13 @@ display client.
 
 ```
 ┌─ macOS ──────────────────────────┐      ┌─ Windows VM (UTM) ─────────────┐
-│  wbm sync ──────────HTTP:7148──────────▶  WinBoat Guest Server (service) │
+│  dinghy sync ───────HTTP:7148──────────▶ │  WinBoat Guest Server (service)│
 │    │  app list + icons           │      │    - enumerates installed apps │
 │    ▼                             │      │                                │
-│  ~/Applications/WinBoat/*.app    │      │  RDP host (RemoteApp/RAIL      │
+│  ~/Applications/WinDinghy/*.app  │      │  RDP host (RemoteApp/RAIL      │
 │    each wraps a .rdp file        │      │   unlocked via registry)       │
 │    │                             │      │                                │
-│    └─ open ▶ Windows App ──RDP:3389────▶  app renders as its own window  │
+│    └─ open ▶ Windows App ──RDP:3389────▶ │  app renders as its own window │
 └──────────────────────────────────┘      └────────────────────────────────┘
 ```
 
@@ -28,7 +28,7 @@ display client.
 - `setup.ps1` enables the RDP host and flips the `TSAppAllowList` /
   `fAllowUnlistedRemotePrograms` registry keys so **any** program can run as a
   RemoteApp on Windows Pro — no RDS server needed.
-- `wbm sync` turns each app into a small `.app` bundle containing a generated
+- `dinghy sync` turns each app into a small `.app` bundle containing a generated
   `.rdp` file (`remoteapplicationmode:i:1`) that opens in **Windows App**.
 
 ## Requirements
@@ -37,14 +37,14 @@ display client.
   on a network the Mac can reach (UTM "Shared Network" works out of the box).
 - [Windows App](https://apps.apple.com/app/windows-app/id1295203466) (the former
   Microsoft Remote Desktop) — already installed.
-- Node.js on the Mac (for the `wbm` CLI).
+- Node.js on the Mac (for the `dinghy` CLI).
 
 ## Setup (one time)
 
 1. Start the Windows VM, then on the Mac:
 
    ```sh
-   ./wbm serve-setup
+   ./dinghy serve-setup
    ```
 
 2. It prints a one-liner. In the VM, open **PowerShell as Administrator** and run:
@@ -56,32 +56,32 @@ display client.
    This enables RDP, unlocks RemoteApp, installs the guest server service, and
    opens firewall ports. It's idempotent — safe to re-run.
 
-3. `wbm serve-setup` detects the guest coming up and runs the first sync
-   automatically. Done — check `~/Applications/WinBoat`.
+3. `dinghy serve-setup` detects the guest coming up and runs the first sync
+   automatically. Done — check `~/Applications/WinDinghy`.
 
 4. First launch only: Windows App will show a certificate warning (the VM uses a
    self-signed RDP cert — accept it) and ask for your **Windows username and
    password** (tick "save" so it goes into the Keychain). Set
-   `wbm config username <user>` to pre-fill the username in generated files.
+   `dinghy config username <user>` to pre-fill the username in generated files.
 
 ## Daily use
 
 ```sh
-./wbm sync              # re-scan apps after installing something in Windows
-./wbm launch "Excel"    # or just open the .app from Spotlight/Finder
-./wbm desktop           # full Windows desktop session
-./wbm status            # guest health, CPU/RAM, RDP reachability
-./wbm config            # show config (~/.config/winboat-mac/config.json)
+./dinghy sync              # re-scan apps after installing something in Windows
+./dinghy launch "Excel"    # or just open the .app from Spotlight/Finder
+./dinghy desktop           # full Windows desktop session
+./dinghy status            # guest health, CPU/RAM, RDP reachability
+./dinghy config            # show config (~/.config/windinghy/config.json)
 ```
 
 ## Menu-bar app
 
-`host/menubar/build.sh` builds `~/Applications/WinBoat.app`, a native menu-bar
+`host/menubar/build.sh` builds `~/Applications/WinDinghy.app`, a native menu-bar
 "Start button": VM online/offline status with live CPU/RAM, a Running section
 for open RemoteApp windows (count badge on the icon; window titles once you
 grant Screen Recording), an Apps submenu with icons, Sync Apps Now, Open
 Windows Desktop, Start Windows VM when it's offline, and a Start-at-Login
-toggle. Rebuild after `wbm` changes: `./host/menubar/build.sh`.
+toggle. Rebuild after `dinghy` changes: `./host/menubar/build.sh`.
 
 Note: all RemoteApp windows belong to the single "Windows App" process, so
 the Dock can only ever show one icon for all of them — per-app running
@@ -89,17 +89,17 @@ indicators live in this menu instead.
 
 ## Launch behavior
 
-Launchers are dynamic: each `.app` calls `wbm open-rdp`, which
+Launchers are dynamic: each `.app` calls `dinghy open-rdp`, which
 1. health-checks the configured VM address,
 2. if unreachable, **rescans the vmnet bridge subnets** for the guest API and
    self-repairs the config (survives DHCP changes; adds ~10s to that launch),
-3. if nothing answers, **starts the UTM VM** (`wbm config vmName` — default
+3. if nothing answers, **starts the UTM VM** (`dinghy config vmName` — default
    "Windows") and waits up to 3 minutes for it to boot, with progress shown
    as macOS notifications,
 4. then generates a fresh `.rdp` and hands it to Windows App.
 
 Sync filters out non-launchable noise (codec packs, runtimes, uninstallers);
-see everything with `wbm config filter off` + re-sync.
+see everything with `dinghy config filter off` + re-sync.
 
 ## Troubleshooting
 
@@ -111,7 +111,7 @@ see everything with `wbm config filter off` + re-sync.
 
 - **Auto-start doesn't kick in** — the first `utmctl` invocation may trigger a
   macOS automation-permission prompt for UTM; approve it once. Check the VM
-  name matches: `wbm config vmName`.
+  name matches: `dinghy config vmName`.
 - **RDP closed after setup** — the VM's network profile may be "Public" with
   stricter rules; setup adds explicit any-profile rules, so re-run the
   one-liner and check `Get-Service TermService`.
@@ -129,10 +129,10 @@ see everything with `wbm config filter off` + re-sync.
 ## Layout
 
 ```
-wbm              CLI entry point (bash shim → host/wbm.mjs)
-host/wbm.mjs     the whole host-side tool (zero-dependency Node)
+dinghy              CLI entry point (bash shim → host/dinghy.mjs)
+host/dinghy.mjs     the whole host-side tool (zero-dependency Node)
 payload/         what gets installed into the VM at C:\Program Files\WinBoat
-  setup.ps1        guest configurator (served templated by `wbm serve-setup`)
+  setup.ps1        guest configurator (served templated by `dinghy serve-setup`)
   server/          winboat_guest_server.exe (Go, windows/arm64) + PS scripts
   nssm.exe         service wrapper (SHA-1 verified against upstream)
 ```

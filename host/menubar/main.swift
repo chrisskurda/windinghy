@@ -3,7 +3,7 @@
 import AppKit
 import ServiceManagement
 
-// ---------- config (shared with wbm) ----------
+// ---------- config (shared with dinghy) ----------
 
 struct WBConfig {
     var host = "192.168.64.8"
@@ -12,9 +12,9 @@ struct WBConfig {
     var vmName = "Windows"
     var username = ""
     var promptcreds = "on"
-    var appsDir = NSString(string: "~/Applications/WinBoat").expandingTildeInPath
+    var appsDir = NSString(string: "~/Applications/WinDinghy").expandingTildeInPath
 
-    static let path = NSString(string: "~/.config/winboat-mac/config.json").expandingTildeInPath
+    static let path = NSString(string: "~/.config/windinghy/config.json").expandingTildeInPath
 
     static func load() -> WBConfig {
         var c = WBConfig()
@@ -30,7 +30,7 @@ struct WBConfig {
         return c
     }
 
-    // Read-modify-write a single key, preserving everything wbm has stored.
+    // Read-modify-write a single key, preserving everything dinghy has stored.
     static func update(_ key: String, _ value: Any) {
         let fm = FileManager.default
         try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
@@ -49,11 +49,11 @@ func findNode() -> String? {
     return nil
 }
 
-func findWbm() -> String? {
-    if let env = ProcessInfo.processInfo.environment["WBM_PATH"] { return env }
+func findDinghy() -> String? {
+    if let env = ProcessInfo.processInfo.environment["DINGHY_PATH"] { return env }
     let candidates = [
-        NSString(string: "~/winboat-mac/host/wbm.mjs").expandingTildeInPath,
-        Bundle.main.bundlePath + "/Contents/Resources/wbm.mjs",
+        NSString(string: "~/windinghy/host/dinghy.mjs").expandingTildeInPath,
+        Bundle.main.bundlePath + "/Contents/Resources/dinghy.mjs",
     ]
     return candidates.first { FileManager.default.fileExists(atPath: $0) }
 }
@@ -125,7 +125,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     }
 
     func poll() {
-        cfg = WBConfig.load()  // pick up wbm's self-repaired host
+        cfg = WBConfig.load()  // pick up dinghy's self-repaired host
         fetchJSON("/health") { [weak self] health in
             guard let self else { return }
             self.online = health?["status"] as? String == "ok"
@@ -203,7 +203,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     }
 
     func usageCounts() -> [String: Int] {
-        let path = NSString(string: "~/.config/winboat-mac/usage.json").expandingTildeInPath
+        let path = NSString(string: "~/.config/windinghy/usage.json").expandingTildeInPath
         guard let data = FileManager.default.contents(atPath: path),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Int] else { return [:] }
         return json
@@ -528,18 +528,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     }
 
     @objc func runSync() {
-        guard let node = findNode(), let wbm = findWbm() else {
-            notify("Can't find node or wbm.mjs — run wbm sync from a terminal instead.")
+        guard let node = findNode(), let dinghy = findDinghy() else {
+            notify("Can't find node or dinghy.mjs — run dinghy sync from a terminal instead.")
             return
         }
         syncing = true
         let p = Process()
         p.executableURL = URL(fileURLWithPath: node)
-        p.arguments = [wbm, "sync"]
+        p.arguments = [dinghy, "sync"]
         p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
                 self?.syncing = false
-                self?.notify(proc.terminationStatus == 0 ? "App list synced." : "Sync failed — run wbm sync in a terminal for details.")
+                self?.notify(proc.terminationStatus == 0 ? "App list synced." : "Sync failed — run dinghy sync in a terminal for details.")
             }
         }
         try? p.run()
@@ -567,8 +567,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                   "Install UTM from https://mac.getutm.app — it runs the Windows VM.")
             check(findNode() != nil, "Node.js available",
                   "Install node (brew install node) — the launchers use it to find the VM.")
-            check(findWbm() != nil, "wbm CLI found",
-                  "Keep the winboat-mac folder at ~/winboat-mac, or set WBM_PATH.")
+            check(findDinghy() != nil, "dinghy CLI found",
+                  "keep the windinghy folder at ~/windinghy, or set DINGHY_PATH.")
 
             var apiOk = false
             var skewSec: Double? = nil
@@ -591,7 +591,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             }.resume()
             _ = sem.wait(timeout: .now() + 4)
             check(apiOk, "Guest agent reachable (\(c.host):\(c.apiPort))",
-                  "Start the VM in UTM. If the agent was never installed: run `./wbm serve-setup` in Terminal, then inside Windows open PowerShell as Administrator and paste the one-liner it prints.")
+                  "Start the VM in UTM. If the agent was never installed: run `./dinghy serve-setup` in Terminal, then inside Windows open PowerShell as Administrator and paste the one-liner it prints.")
             if apiOk, let skew = skewSec {
                 check(skew < 120, "Guest clock skew \(Int(skew))s",
                       "Guest clock drifted — RDP will fail with security errors (0x1807). In the VM run `w32tm /resync`, or restart the VM. Re-running the setup one-liner installs an automatic 15-minute sync.")

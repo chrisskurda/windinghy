@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// wbm — WinDinghy host CLI
+// dinghy — WinDinghy host CLI
 // Talks to the WinBoat Guest Server inside a Windows VM (UTM or anything
 // reachable over IP) and turns Windows apps into native-feeling macOS
 // launchers that open as RemoteApp windows via Microsoft's "Windows App".
 //
 // Commands:
-//   wbm serve-setup          serve the guest payload + setup one-liner, wait for the guest
-//   wbm status               guest health / version / metrics
-//   wbm sync                 fetch app list, (re)generate ~/Applications/WinBoat/*.app
-//   wbm launch <name>        launch a synced app
-//   wbm desktop              open a full Windows desktop session
-//   wbm config [key value]   show or set config (host, username, appsDir, ...)
+//   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
+//   dinghy status               guest health / version / metrics
+//   dinghy sync                 fetch app list, (re)generate ~/Applications/WinBoat/*.app
+//   dinghy launch <name>        launch a synced app
+//   dinghy desktop              open a full Windows desktop session
+//   dinghy config [key value]   show or set config (host, username, appsDir, ...)
 
 import fs from "node:fs";
 import os from "node:os";
@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PAYLOAD_DIR = path.join(PROJECT_ROOT, "payload");
-const CONFIG_DIR = path.join(os.homedir(), ".config", "winboat-mac");
+const CONFIG_DIR = path.join(os.homedir(), ".config", "windinghy");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const SETUP_PORT = 8756;
 
@@ -35,10 +35,10 @@ const DEFAULTS = {
     promptcreds: "on",
     vmName: "Windows",
     filter: "on",
-    appsDir: path.join(os.homedir(), "Applications", "WinBoat"),
+    appsDir: path.join(os.homedir(), "Applications", "WinDinghy"),
 };
 
-// Default noise filter for `wbm sync` (disable with: wbm config filter off).
+// Default noise filter for `dinghy sync` (disable with: dinghy config filter off).
 // Matches OS plumbing that shows up in the guest's app enumeration but isn't
 // something you'd launch: codec/extension packs, runtimes, uninstallers, etc.
 const EXCLUDE_PATTERNS = [
@@ -60,12 +60,34 @@ function fixName(name) {
 
 // ---------- config ----------
 
-function loadConfig() {
-    try {
-        return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
-    } catch {
-        return { ...DEFAULTS };
+// Pre-rename installs used ~/.config/winboat-mac and ~/Applications/WinBoat;
+// migrate both silently so existing setups keep working.
+function migrateLegacyPaths() {
+    const oldConfigDir = path.join(os.homedir(), ".config", "winboat-mac");
+    if (!fs.existsSync(CONFIG_DIR) && fs.existsSync(oldConfigDir)) {
+        fs.cpSync(oldConfigDir, CONFIG_DIR, { recursive: true });
     }
+}
+
+function loadConfig() {
+    migrateLegacyPaths();
+    let cfg;
+    try {
+        cfg = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
+    } catch {
+        cfg = { ...DEFAULTS };
+    }
+    const oldAppsDir = path.join(os.homedir(), "Applications", "WinBoat");
+    if (cfg.appsDir === oldAppsDir) {
+        cfg.appsDir = DEFAULTS.appsDir;
+        try {
+            if (fs.existsSync(oldAppsDir) && !fs.existsSync(cfg.appsDir)) {
+                fs.renameSync(oldAppsDir, cfg.appsDir);
+            }
+        } catch {}
+        saveConfig(cfg);
+    }
+    return cfg;
 }
 
 function saveConfig(cfg) {
@@ -130,7 +152,7 @@ function addUsername(cfg, lines) {
     if (!cfg.username) return;
     lines.unshift(`username:s:${cfg.username.replace("/", "\\")}`);
     // Force the credential prompt unless disabled (once creds are saved in
-    // Windows App, turn off for silent connects: wbm config promptcreds off)
+    // Windows App, turn off for silent connects: dinghy config promptcreds off)
     if (cfg.promptcreds !== "off") lines.push("prompt for credentials on client:i:1");
 }
 
@@ -179,7 +201,7 @@ function writeAppBundle(cfg, dirName, displayName, rdpContent, iconBase64, tmpDi
     fs.mkdirSync(resources, { recursive: true });
 
     // Static .rdp as a last-resort fallback; normal launches go through
-    // `wbm open-rdp`, which regenerates it with the VM's current address.
+    // `dinghy open-rdp`, which regenerates it with the VM's current address.
     fs.writeFileSync(path.join(resources, "app.rdp"), rdpContent);
     fs.writeFileSync(path.join(resources, "app.json"), JSON.stringify(appMeta ?? { desktop: true }, null, 2));
 
@@ -188,7 +210,7 @@ function writeAppBundle(cfg, dirName, displayName, rdpContent, iconBase64, tmpDi
         iconEntry = "    <key>CFBundleIconFile</key>\n    <string>app</string>\n";
     }
 
-    const bundleId = "app.winboat-mac." + dirName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const bundleId = "app.windinghy." + dirName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     fs.writeFileSync(
         path.join(contents, "Info.plist"),
         `<?xml version="1.0" encoding="UTF-8"?>
@@ -217,8 +239,8 @@ ${iconEntry}    <key>CFBundleShortVersionString</key>
     fs.writeFileSync(
         launcher,
         `#!/bin/bash
-# Generated by wbm sync. Launches via wbm (auto-rediscovers the VM, boots it
-# if needed); falls back to the static .rdp if node/wbm has moved.
+# Generated by dinghy sync. Launches via dinghy (auto-rediscovers the VM, boots it
+# if needed); falls back to the static .rdp if node/dinghy has moved.
 DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
 if [ -x "${nodeBin}" ] && [ -f "${wbmPath}" ]; then
     exec "${nodeBin}" "${wbmPath}" open-rdp "$DIR"
@@ -262,7 +284,7 @@ async function cmdSync(cfg) {
     console.log(`Guest reports ${apps.length} apps`);
 
     fs.mkdirSync(cfg.appsDir, { recursive: true });
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wbm-icons-"));
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dinghy-icons-"));
     const kept = new Set();
 
     // Clean names, drop noise, dedupe by name
@@ -275,7 +297,7 @@ async function cmdSync(cfg) {
         const key = safeName(app.Name);
         if (!byName.has(key)) byName.set(key, app);
     }
-    if (filtered) console.log(`Filtered ${filtered} non-app entries (codecs/runtimes/etc; disable with: wbm config filter off)`);
+    if (filtered) console.log(`Filtered ${filtered} non-app entries (codecs/runtimes/etc; disable with: dinghy config filter off)`);
 
     let made = 0;
     for (const [key, app] of byName) {
@@ -299,10 +321,10 @@ async function cmdSync(cfg) {
     fs.rmSync(tmpDir, { recursive: true, force: true });
 
     console.log(`Synced ${made} apps -> ${cfg.appsDir}`);
-    console.log(`Launch from Spotlight, Finder, or: wbm launch "<name>"`);
+    console.log(`Launch from Spotlight, Finder, or: dinghy launch "<name>"`);
     if (!cfg.username) {
         console.log(`Tip: set your Windows username so Windows App can pre-fill it:`);
-        console.log(`  wbm config username <your-windows-user>`);
+        console.log(`  dinghy config username <your-windows-user>`);
     }
 }
 
@@ -423,10 +445,10 @@ async function cmdDoctor(cfg) {
         "Install from https://mac.getutm.app");
     add(true, `node ${process.version}`, "");
     const cfgExists = fs.existsSync(CONFIG_PATH);
-    add(cfgExists, "wbm config present", "Run: wbm sync (or wbm serve-setup for first-time setup)");
+    add(cfgExists, "dinghy config present", "Run: dinghy sync (or dinghy serve-setup for first-time setup)");
     const alive = await guestAlive(cfg, 3000);
     add(alive, `guest agent at ${cfg.host}:${cfg.apiPort}`,
-        "VM off or agent not installed. Start the VM in UTM; for first-time guest setup run `wbm serve-setup` on the Mac, then paste the printed one-liner into an elevated PowerShell inside Windows.");
+        "VM off or agent not installed. Start the VM in UTM; for first-time guest setup run `dinghy serve-setup` on the Mac, then paste the printed one-liner into an elevated PowerShell inside Windows.");
     const rdp = await portOpen(cfg.host, cfg.rdpPort);
     add(rdp, `RDP at ${cfg.host}:${cfg.rdpPort}`,
         "RDP host not enabled in the guest — re-run the serve-setup one-liner inside Windows (needs Windows Pro/Enterprise).");
@@ -441,7 +463,7 @@ async function cmdDoctor(cfg) {
         } catch {}
     }
     const launcherCount = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")).length : 0;
-    add(launcherCount > 0, `${launcherCount} app launchers in ${cfg.appsDir}`, "Run: wbm sync");
+    add(launcherCount > 0, `${launcherCount} app launchers in ${cfg.appsDir}`, "Run: dinghy sync");
 
     let allOk = true;
     for (const c of checks) {
@@ -452,12 +474,12 @@ async function cmdDoctor(cfg) {
 }
 
 async function cmdLaunch(cfg, name) {
-    if (!name) throw new Error(`Usage: wbm launch "<app name>"`);
+    if (!name) throw new Error(`Usage: dinghy launch "<app name>"`);
     const entries = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")) : [];
     const match =
         entries.find(e => e.toLowerCase() === `${name.toLowerCase()}.app`) ??
         entries.find(e => e.toLowerCase().includes(name.toLowerCase()));
-    if (!match) throw new Error(`No synced app matches "${name}". Run: wbm sync`);
+    if (!match) throw new Error(`No synced app matches "${name}". Run: dinghy sync`);
     console.log(`Launching ${match.replace(/\.app$/, "")} ...`);
     await cmdOpenRdp(cfg, path.join(cfg.appsDir, match, "Contents", "Resources"));
 }
@@ -482,7 +504,7 @@ async function cmdServeSetup(cfg) {
     const setupScript = setupTemplate.replace("__BASE_URL__", baseUrl);
 
     // Build payload.zip fresh (server binary + scripts + nssm)
-    const zipPath = path.join(os.tmpdir(), "wbm-payload.zip");
+    const zipPath = path.join(os.tmpdir(), "dinghy-payload.zip");
     fs.rmSync(zipPath, { force: true });
     execFileSync("ditto", ["-c", "-k", "--norsrc", PAYLOAD_DIR, zipPath]);
     const zipBuf = fs.readFileSync(zipPath);
@@ -558,16 +580,16 @@ try {
         case "doctor":      await cmdDoctor(cfg); break;
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
         default:
-            console.log(`wbm — WinDinghy
+            console.log(`dinghy — WinDinghy
 
 Usage:
-  wbm serve-setup          serve guest payload; prints the one-liner to run in the VM
-  wbm status               guest health / metrics / RDP reachability
-  wbm sync                 generate ~/Applications/WinBoat/*.app launchers
-  wbm launch "<name>"      launch a Windows app
-  wbm desktop              full Windows desktop session
-  wbm doctor               check mac-side + guest-side requirements
-  wbm config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)`);
+  dinghy serve-setup          serve guest payload; prints the one-liner to run in the VM
+  dinghy status               guest health / metrics / RDP reachability
+  dinghy sync                 generate ~/Applications/WinBoat/*.app launchers
+  dinghy launch "<name>"      launch a Windows app
+  dinghy desktop              full Windows desktop session
+  dinghy doctor               check mac-side + guest-side requirements
+  dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)`);
     }
 } catch (e) {
     console.error(`Error: ${e.message}`);

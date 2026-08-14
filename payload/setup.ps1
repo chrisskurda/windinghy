@@ -1,4 +1,4 @@
-# WinBoat-Mac guest setup
+# WinDinghy guest setup
 # Run inside the Windows VM in an *elevated* PowerShell:
 #   irm http://<mac-ip>:8756/setup.ps1 | iex
 #
@@ -142,4 +142,4 @@ try {
 $ips = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike "169.*" -and $_.IPAddress -ne "127.0.0.1" }).IPAddress -join ", "
 Write-Host ""
 Write-Host "Done. Guest IPs: $ips" -ForegroundColor Green
-Write-Host "Back on the Mac, run: wbm sync" -ForegroundColor Green
+Write-Host "Back on the Mac, run: dinghy sync" -ForegroundColor Green

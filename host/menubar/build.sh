@@ -7,14 +7,14 @@ APP="$HOME/Applications/WinDinghy.app"
 REPO_ROOT="$(cd ../.. && pwd)"
 
 echo "Compiling..."
-swiftc -O -swift-version 5 main.swift -o winboat-menubar
+swiftc -O -swift-version 5 main.swift -o windinghy-menubar
 
 echo "Assembling bundle at $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-mv winboat-menubar "$APP/Contents/MacOS/"
-# Bundle a copy of wbm.mjs so Sync works even if the repo moves
-cp "$REPO_ROOT/host/wbm.mjs" "$APP/Contents/Resources/wbm.mjs"
+mv windinghy-menubar "$APP/Contents/MacOS/"
+# Bundle a copy of dinghy.mjs so Sync works even if the repo moves
+cp "$REPO_ROOT/host/dinghy.mjs" "$APP/Contents/Resources/dinghy.mjs"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,7 +24,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleName</key><string>WinDinghy</string>
     <key>CFBundleIdentifier</key><string>app.windinghy.menubar</string>
-    <key>CFBundleExecutable</key><string>winboat-menubar</string>
+    <key>CFBundleExecutable</key><string>windinghy-menubar</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
