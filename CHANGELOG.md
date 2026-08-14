@@ -8,6 +8,15 @@ bumps may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- Guest setup from the menu-bar app: a "Set Up Windows VM…" item (shown
+  prominently while the guest is unreachable, e.g. on first run) serves the
+  install payload and displays the PowerShell one-liner with the correct IP
+  to run inside Windows; apps sync automatically once the guest comes up.
+- `dinghy serve-setup --json` machine-readable mode backing the GUI flow.
+- The menu-bar app's Info.plist version now tracks the dinghy `VERSION`.
+
 ## [0.1.0] - 2026-08-13
 
 First versioned release.

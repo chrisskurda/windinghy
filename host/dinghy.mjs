@@ -508,7 +508,11 @@ function detectServeIp(cfg) {
     return null;
 }
 
-async function cmdServeSetup(cfg) {
+// With json=true (used by the menu-bar app) the first stdout line is
+// machine-readable: {"url": ..., "oneliner": ...}; human logs are suppressed.
+async function cmdServeSetup(cfg, json = false) {
+    if (!fs.existsSync(path.join(PAYLOAD_DIR, "setup.ps1")))
+        throw new Error(`Guest payload not found at ${PAYLOAD_DIR} — run from a full windinghy checkout.`);
     const ip = detectServeIp(cfg);
     if (!ip) throw new Error(`No local interface on the guest's subnet (${cfg.host}/24). Is the VM running with shared networking?`);
 
@@ -538,25 +542,31 @@ async function cmdServeSetup(cfg) {
     });
     server.listen(SETUP_PORT, ip);
 
-    console.log(`Serving guest setup on ${baseUrl}`);
-    console.log(``);
-    console.log(`  In the Windows VM, open PowerShell **as Administrator** and run:`);
-    console.log(``);
-    console.log(`      irm ${baseUrl}/setup.ps1 | iex`);
-    console.log(``);
+    const oneliner = `irm ${baseUrl}/setup.ps1 | iex`;
+    if (json) {
+        console.log(JSON.stringify({ url: baseUrl, oneliner }));
+    } else {
+        console.log(`Serving guest setup on ${baseUrl}`);
+        console.log(``);
+        console.log(`  In the Windows VM, open PowerShell **as Administrator** and run:`);
+        console.log(``);
+        console.log(`      ${oneliner}`);
+        console.log(``);
+    }
     // Re-run case: guest already online means the user is refreshing guest
-    // config, not installing — keep serving until they Ctrl-C.
+    // config, not installing — keep serving until stopped (Ctrl-C, or the
+    // menu-bar app's Stop button).
     if (await guestAlive(cfg, 2500)) {
-        console.log(`Guest is already online — serving the (updated) setup script until Ctrl-C.`);
+        if (!json) console.log(`Guest is already online — serving the (updated) setup script until Ctrl-C.`);
         await new Promise(() => {});
     }
 
-    console.log(`Waiting for the guest server to come up on ${cfg.host}:${cfg.apiPort} (Ctrl-C to stop) ...`);
+    if (!json) console.log(`Waiting for the guest server to come up on ${cfg.host}:${cfg.apiPort} (Ctrl-C to stop) ...`);
     while (true) {
         await new Promise(r => setTimeout(r, 3000));
         if (await guestAlive(cfg, 2500)) break;
     }
-    console.log(`Guest server is UP. Running first sync ...`);
+    if (!json) console.log(`Guest server is UP. Running first sync ...`);
     server.close();
     await cmdSync(cfg);
 }
@@ -584,7 +594,7 @@ const cfg = loadConfig();
 
 try {
     switch (cmd) {
-        case "serve-setup": await cmdServeSetup(cfg); break;
+        case "serve-setup": await cmdServeSetup(cfg, rest.includes("--json")); break;
         case "status":      await cmdStatus(cfg); break;
         case "sync":        await cmdSync(cfg); break;
         case "launch":      await cmdLaunch(cfg, rest.join(" ")); break;

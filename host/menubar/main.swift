@@ -85,6 +85,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var online = false
     var metricsLine = ""
     var syncing = false
+    var setupProcess: Process?
+    var setupCommand = ""
+    var setupURL = ""
+    var setupStderr = ""
+    var setupStopped = false
     var searchQuery = ""
     var searchField: NSSearchField?
     var searchItem: NSMenuItem?
@@ -282,6 +287,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             menu.addItem(makeItem("Restart Windows VM", #selector(restartVM), ""))
         } else {
             menu.addItem(makeItem("Start Windows VM", #selector(startVM), "b"))
+            // First run / unreachable guest: offer the install-script flow here
+            menu.addItem(setupMenuItem())
         }
         menu.addItem(.separator())
 
@@ -291,6 +298,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         promptItem.state = cfg.promptcreds != "off" ? .on : .off
         menu.addItem(promptItem)
         menu.addItem(makeItem("Setup Check…", #selector(setupCheck), ""))
+        if online { menu.addItem(setupMenuItem()) }
         let login = makeItem("Start at Login", #selector(toggleLogin), "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
@@ -545,6 +553,118 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         try? p.run()
     }
 
+    // ---------- guest setup (serve install script) ----------
+
+    func setupMenuItem() -> NSMenuItem {
+        makeItem(setupProcess == nil ? "Set Up Windows VM…" : "Windows Setup Command…", #selector(showSetup), "")
+    }
+
+    // Runs `dinghy serve-setup --json`, which serves the guest payload on the
+    // vmnet interface and prints one JSON line with the PowerShell one-liner
+    // (correct Mac IP baked in). The process keeps serving; it exits 0 on its
+    // own after the guest comes up and the first sync finishes.
+    @objc func showSetup() {
+        if setupProcess != nil {
+            if setupCommand.isEmpty { notify("Setup server is still starting…") } else { showSetupAlert() }
+            return
+        }
+        guard let node = findNode(), let dinghy = findDinghy() else {
+            notify("Can't find node or dinghy.mjs — run ./dinghy serve-setup from a terminal instead.")
+            return
+        }
+        setupCommand = ""; setupURL = ""; setupStderr = ""; setupStopped = false
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [dinghy, "serve-setup", "--json"]
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        var buffer = Data()
+        var announced = false
+        out.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let chunk = h.availableData
+            guard !chunk.isEmpty, !announced else { return }
+            buffer.append(chunk)
+            guard let text = String(data: buffer, encoding: .utf8), text.contains("\n"),
+                  let line = text.split(separator: "\n").first,
+                  let data = line.data(using: .utf8),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let cmd = json["oneliner"] as? String else { return }
+            announced = true
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setupCommand = cmd
+                self.setupURL = json["url"] as? String ?? ""
+                self.showSetupAlert()
+            }
+        }
+        err.fileHandleForReading.readabilityHandler = { [weak self] h in
+            guard let s = String(data: h.availableData, encoding: .utf8), !s.isEmpty else { return }
+            DispatchQueue.main.async { self?.setupStderr += s }
+        }
+        p.terminationHandler = { [weak self] proc in
+            out.fileHandleForReading.readabilityHandler = nil
+            err.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setupProcess = nil
+                if self.setupStopped { return }
+                if proc.terminationStatus == 0 {
+                    self.notify("Windows setup complete — apps synced.")
+                    self.poll()
+                } else {
+                    let msg = self.setupStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.notify(msg.isEmpty ? "Setup server stopped unexpectedly." : msg)
+                }
+            }
+        }
+        do { try p.run() } catch {
+            notify("Couldn't start the setup server: \(error.localizedDescription)")
+            return
+        }
+        setupProcess = p
+    }
+
+    func showSetupAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Set Up the Windows VM"
+        alert.informativeText = """
+            WinDinghy is serving the installer at \(setupURL).
+
+            In the Windows VM, open PowerShell as Administrator and run the \
+            command below. It enables RDP/RemoteApp and installs the guest \
+            agent (needs Windows Pro/Enterprise/Education). Safe to re-run.
+
+            Leave WinDinghy running — when the guest comes online, apps sync \
+            automatically.
+            """
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        field.stringValue = setupCommand
+        field.isEditable = false
+        field.isSelectable = true
+        field.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Copy Command")
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Stop Setup Server")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(setupCommand, forType: .string)
+        case .alertThirdButtonReturn:
+            setupStopped = true
+            setupProcess?.terminate()
+            setupProcess = nil
+        default:
+            break
+        }
+    }
+
+    func applicationWillTerminate(_ n: Notification) {
+        setupProcess?.terminate()
+    }
+
     // ---------- setup check ----------
 
     @objc func setupCheck() {
@@ -591,7 +711,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             }.resume()
             _ = sem.wait(timeout: .now() + 4)
             check(apiOk, "Guest agent reachable (\(c.host):\(c.apiPort))",
-                  "Start the VM in UTM. If the agent was never installed: run `./dinghy serve-setup` in Terminal, then inside Windows open PowerShell as Administrator and paste the one-liner it prints.")
+                  "Start the VM in UTM. If the agent was never installed, choose \"Set Up Windows VM…\" from this menu and run the shown command inside Windows.")
             if apiOk, let skew = skewSec {
                 check(skew < 120, "Guest clock skew \(Int(skew))s",
                       "Guest clock drifted — RDP will fail with security errors (0x1807). In the VM run `w32tm /resync`, or restart the VM. Re-running the setup one-liner installs an automatic 15-minute sync.")
@@ -599,7 +719,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
 
             let rdpOk = tcpOpen(host: c.host, port: c.rdpPort)
             check(rdpOk, "RDP reachable (\(c.host):\(c.rdpPort))",
-                  "Windows isn't accepting RDP — re-run the serve-setup one-liner inside the VM (requires Windows Pro/Enterprise, not Home).")
+                  "Windows isn't accepting RDP — choose \"Set Up Windows VM…\" from this menu and re-run the command inside the VM (requires Windows Pro/Enterprise, not Home).")
 
             let launcherCount = ((try? fm.contentsOfDirectory(atPath: c.appsDir)) ?? []).filter { $0.hasSuffix(".app") }.count
             check(launcherCount > 0, "\(launcherCount) app launchers synced",

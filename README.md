@@ -41,6 +41,13 @@ display client.
 
 ## Setup (one time)
 
+Using the menu-bar app: start the Windows VM, then choose **Set Up Windows
+VM…** from the WinDinghy menu (shown while the guest is unreachable, e.g. on
+first run). It displays the install command with the correct IP — run it inside
+Windows as described in step 2, and the first sync happens automatically.
+
+From the terminal instead:
+
 1. Start the Windows VM, then on the Mac:
 
    ```sh
