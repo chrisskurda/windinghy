@@ -175,6 +175,12 @@ function safeName(name) {
     return name.replace(/[/:]/g, "-").replace(/\s+/g, " ").trim();
 }
 
+// Windows App titles RemoteApp windows after the .rdp filename, so name the
+// file after the app (must also be safe to embed in the launcher script).
+function rdpFileName(name) {
+    return (safeName(name).replace(/["'`$\\]/g, "") || "app") + ".rdp";
+}
+
 function makeIcns(pngBase64, icnsPath, tmpDir) {
     // Guest icons are 32x32 PNGs; upscale into a minimal iconset.
     const src = path.join(tmpDir, "src.png");
@@ -202,7 +208,8 @@ function writeAppBundle(cfg, dirName, displayName, rdpContent, iconBase64, tmpDi
 
     // Static .rdp as a last-resort fallback; normal launches go through
     // `dinghy open-rdp`, which regenerates it with the VM's current address.
-    fs.writeFileSync(path.join(resources, "app.rdp"), rdpContent);
+    const rdpFile = rdpFileName(displayName);
+    fs.writeFileSync(path.join(resources, rdpFile), rdpContent);
     fs.writeFileSync(path.join(resources, "app.json"), JSON.stringify(appMeta ?? { desktop: true }, null, 2));
 
     let iconEntry = "";
@@ -245,7 +252,7 @@ DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
 if [ -x "${nodeBin}" ] && [ -f "${wbmPath}" ]; then
     exec "${nodeBin}" "${wbmPath}" open-rdp "$DIR"
 fi
-exec open -a "Windows App" "$DIR/app.rdp"
+exec open -a "Windows App" "$DIR/${rdpFile}"
 `);
     fs.chmodSync(launcher, 0o755);
     return appPath;
@@ -419,8 +426,10 @@ async function cmdOpenRdp(cfg, bundleDir) {
         process.exit(1);
     }
     const rdp = meta.desktop ? rdpForDesktop(cfg) : rdpForApp(cfg, meta);
-    const rdpPath = path.join(bundleDir, "app.rdp");
+    const rdpPath = path.join(bundleDir, rdpFileName(meta.desktop ? "Windows Desktop" : meta.Name));
     fs.writeFileSync(rdpPath, rdp);
+    // Bundles synced before rdp files were named after the app left an app.rdp behind
+    if (path.basename(rdpPath) !== "app.rdp") fs.rmSync(path.join(bundleDir, "app.rdp"), { force: true });
     execFileSync("open", ["-a", "Windows App", rdpPath]);
     bumpUsage(meta.Name ?? "Windows Desktop");
 }

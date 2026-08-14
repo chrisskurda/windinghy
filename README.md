@@ -33,7 +33,7 @@ display client.
 
 ## Requirements
 
-- UTM VM running Windows 11 **Pro/Enterprise/Education** (Home can't host RDP),
+- UTM (Other's may work but are untested) VM running Windows 11 **Pro/Enterprise/Education** (Home can't host RDP),
   on a network the Mac can reach (UTM "Shared Network" works out of the box).
 - [Windows App](https://apps.apple.com/app/windows-app/id1295203466) (the former
   Microsoft Remote Desktop) — already installed.
@@ -120,8 +120,7 @@ see everything with `dinghy config filter off` + re-sync.
 - **Console shows lock screen while an app is open** — normal: an RDP
   connection takes over the Windows session, so the UTM console window locks.
   Use one or the other at a time.
-- **Performance** — give the VM more RAM (it's at 4 GB; 6–8 GB helps Win11 a
-  lot) in UTM settings. The generated .rdp files already use LAN-class
+- **Performance** — give the VM more RAM (it's at 4 GB minimum recommended) in UTM settings. The generated .rdp files already use LAN-class
   settings (no wallpaper/animations, auto-detect off, font smoothing on).
   Windows App's RemoteApp path is much better than it was a few years ago,
   and over the local vmnet there's no network bottleneck.
