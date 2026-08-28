@@ -10,6 +10,16 @@ bumps may include breaking changes).
 
 ### Added
 
+- Self-update: "Check for Updates…" in the menu bar, or `dinghy update` /
+  `./update` from the terminal. Fast-forwards from `origin/main`, rebuilds
+  the menu-bar app, and relaunches it if it was running; refuses to touch a
+  dirty tree or diverged local commits. The update logic lives in the
+  tracked `host/dinghy-update.sh` but only ever runs via a gitignored copy
+  installed at the repo root (`update`), so the git operations an update
+  performs can never delete or corrupt the script recovering from them.
+
+### Added
+
 - Guest setup from the menu-bar app: a "Set Up Windows VM…" item (shown
   prominently while the guest is unreachable, e.g. on first run) serves the
   install payload and displays the PowerShell one-liner with the correct IP

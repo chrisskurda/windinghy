@@ -85,6 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var online = false
     var metricsLine = ""
     var syncing = false
+    var updating = false
     var setupProcess: Process?
     var setupCommand = ""
     var setupURL = ""
@@ -299,6 +300,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         menu.addItem(promptItem)
         menu.addItem(makeItem("Setup Check…", #selector(setupCheck), ""))
         if online { menu.addItem(setupMenuItem()) }
+        menu.addItem(makeItem(updating ? "Checking for Updates…" : "Check for Updates…", #selector(checkForUpdates), "", enabled: !updating))
         let login = makeItem("Start at Login", #selector(toggleLogin), "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
@@ -551,6 +553,76 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             }
         }
         try? p.run()
+    }
+
+    // ---------- self-update ----------
+
+    // The updater's own logic lives at host/dinghy-update.sh (tracked in
+    // git) and is only ever run via the repo-root `update` launcher, which
+    // is gitignored on purpose — see that file for why. This finds the real
+    // checkout (not the dinghy.mjs copy bundled into Contents/Resources,
+    // which has no .git and can't be updated).
+    func findRepoRoot() -> String? {
+        let fm = FileManager.default
+        if let env = ProcessInfo.processInfo.environment["DINGHY_PATH"] {
+            let root = ((env as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+            if fm.fileExists(atPath: root + "/.git") { return root }
+        }
+        let candidate = NSString(string: "~/windinghy").expandingTildeInPath
+        return fm.fileExists(atPath: candidate + "/.git") ? candidate : nil
+    }
+
+    func installedUpdateLauncher(root: String) -> String? {
+        let fm = FileManager.default
+        let launcherPath = root + "/update"
+        if fm.fileExists(atPath: launcherPath) { return launcherPath }
+        let trackedPath = root + "/host/dinghy-update.sh"
+        guard fm.fileExists(atPath: trackedPath) else { return nil }
+        try? fm.copyItem(atPath: trackedPath, toPath: launcherPath)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcherPath)
+        return fm.fileExists(atPath: launcherPath) ? launcherPath : nil
+    }
+
+    @objc func checkForUpdates() {
+        guard let root = findRepoRoot() else {
+            notify("WinDinghy checkout not found at ~/windinghy — can't check for updates.")
+            return
+        }
+        guard let launcherPath = installedUpdateLauncher(root: root) else {
+            notify("Updater script missing from this checkout — re-clone the repo.")
+            return
+        }
+        updating = true
+        notify("Checking for updates…")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [launcherPath]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        var output = ""
+        out.fileHandleForReading.readabilityHandler = { h in
+            if let s = String(data: h.availableData, encoding: .utf8) { output += s }
+        }
+        p.terminationHandler = { [weak self] proc in
+            out.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updating = false
+                if output.contains("Already up to date") {
+                    self.notify("WinDinghy is already up to date.")
+                } else if proc.terminationStatus == 0 {
+                    self.notify("WinDinghy updated — relaunching…")
+                } else {
+                    let lastLine = output.split(separator: "\n").last.map(String.init) ?? "unknown error"
+                    self.notify("Update failed: \(lastLine)")
+                }
+            }
+        }
+        do { try p.run() } catch {
+            updating = false
+            notify("Couldn't run updater: \(error.localizedDescription)")
+        }
     }
 
     // ---------- guest setup (serve install script) ----------

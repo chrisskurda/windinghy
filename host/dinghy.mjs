@@ -499,6 +499,8 @@ async function cmdDoctor(cfg) {
                 "Guest clock has drifted — RDP auth will fail with security errors. In the VM run: w32tm /resync (or re-run the serve-setup one-liner, which installs a 15-min sync task).");
         } catch {}
     }
+    add(fs.existsSync(path.join(PROJECT_ROOT, "host", "dinghy-update.sh")), "updater available",
+        "This checkout is missing host/dinghy-update.sh — re-clone the repo.");
     const launcherCount = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")).length : 0;
     add(launcherCount > 0, `${launcherCount} app launchers in ${cfg.appsDir}`, "Run: dinghy sync");
 
@@ -595,6 +597,21 @@ async function cmdServeSetup(cfg, json = false) {
     await cmdSync(cfg);
 }
 
+// Delegates to the repo-root `update` launcher (installed from the tracked
+// host/dinghy-update.sh on first run) rather than reimplementing the git
+// logic here — see host/dinghy-update.sh for why it's a separate script.
+function cmdUpdate() {
+    const launcher = path.join(PROJECT_ROOT, "update");
+    const tracked = path.join(PROJECT_ROOT, "host", "dinghy-update.sh");
+    if (!fs.existsSync(launcher)) {
+        if (!fs.existsSync(tracked)) throw new Error("Updater script missing — this isn't a full windinghy checkout.");
+        fs.copyFileSync(tracked, launcher);
+        fs.chmodSync(launcher, 0o755);
+    }
+    const r = spawnSync(launcher, [], { stdio: "inherit" });
+    process.exit(r.status ?? 1);
+}
+
 function cmdConfig(cfg, key, value) {
     if (!key) {
         console.log(JSON.stringify(cfg, null, 2));
@@ -626,6 +643,7 @@ try {
         case "open-rdp":    await cmdOpenRdp(cfg, rest[0]); break;
         case "doctor":      await cmdDoctor(cfg); break;
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
+        case "update":      cmdUpdate(); break;
         case "version":
         case "--version":
         case "-v":          console.log(`dinghy ${VERSION}`); break;
@@ -640,6 +658,7 @@ Usage:
   dinghy desktop              full Windows desktop session
   dinghy doctor               check mac-side + guest-side requirements
   dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)
+  dinghy update               pull the latest WinDinghy from git and rebuild
   dinghy version              print the WinDinghy version`);
     }
 } catch (e) {

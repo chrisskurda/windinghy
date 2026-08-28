@@ -81,6 +81,21 @@ From the terminal instead:
 ./dinghy config            # show config (~/.config/windinghy/config.json)
 ```
 
+## Updating
+
+From the menu-bar app: **Check for Updates…**. From the terminal: `./dinghy
+update` (or `./update` directly). Either way it fetches `origin/main`,
+fast-forwards only (never touches a dirty tree or diverged local commits —
+it just tells you to resolve those by hand), rebuilds the menu-bar app, and
+relaunches it if it was running.
+
+The actual update logic lives in `host/dinghy-update.sh`, tracked in git like
+everything else. The thing you actually run is a copy of it installed at the
+repo root as `update` — gitignored on purpose, so that `git pull`/`reset`
+during an update can never delete or corrupt the one script whose job is
+recovering from a bad state; it re-syncs itself from the tracked copy on
+every run, so fixes to the update logic take effect automatically.
+
 ## Menu-bar app
 
 `host/menubar/build.sh` builds `~/Applications/WinDinghy.app`, a native menu-bar
@@ -135,8 +150,9 @@ see everything with `dinghy config filter off` + re-sync.
 ## Layout
 
 ```
-dinghy              CLI entry point (bash shim → host/dinghy.mjs)
-host/dinghy.mjs     the whole host-side tool (zero-dependency Node)
+dinghy               CLI entry point (bash shim → host/dinghy.mjs)
+host/dinghy.mjs      the whole host-side tool (zero-dependency Node)
+host/dinghy-update.sh  update logic; installed as gitignored ./update, see "Updating"
 payload/         what gets installed into the VM at C:\Program Files\WinBoat
   setup.ps1        guest configurator (served templated by `dinghy serve-setup`)
   server/          winboat_guest_server.exe (Go, windows/arm64) + PS scripts
