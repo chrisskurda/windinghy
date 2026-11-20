@@ -26,8 +26,18 @@ bumps may include breaking changes).
 - Failed native launches explain themselves (bad password, same-user console
   session on the VM, clock drift).
 
+- Each app's native process now runs from a bundle-local copy of the client,
+  so macOS shows the app's own icon and name in the Dock; the menu bar uses
+  the Windows program's name (`WINDINGHY_APP_NAME`).
+- `dinghy config suppressBanner on` (or `serve-setup --no-banner`): keep the
+  Windows logon banner suppressed. The guest warns that this may violate your
+  network policy and requires typing YES.
+
 ### Fixed
 
+- The native client exits about 3 seconds after an app's last window closes
+  (it used to linger with a blank Dock icon until the server disconnected
+  ~20s later), and a normal close no longer raises a "session ended" error.
 - Guest setup no longer kills its own RDP session: when run over RDP the
   TermService restart is deferred to a one-shot task.
 - `dinghy serve-setup` now re-discovers the VM when its IP changed instead of

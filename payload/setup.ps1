@@ -163,6 +163,14 @@ if ($bTxt -or $bCap) {
         Ok "Logon banner reported to the Mac"
     } catch { Warn "Could not report the logon banner (non-fatal)" }
     if ($NoLogonBanner) {
+        Write-Host ""
+        Write-Host "    WARNING: you asked to SUPPRESS the Windows logon banner." -ForegroundColor Red
+        Write-Host "    That banner may be your organization's acceptable-use / network policy notice." -ForegroundColor Red
+        Write-Host "    Hiding it may violate that policy. You are responsible for deciding this is OK." -ForegroundColor Red
+        $confirm = Read-Host "    Type YES to suppress it (anything else keeps the banner)"
+        if ($confirm -ne "YES") { $NoLogonBanner = $false; Warn "Banner suppression skipped" }
+    }
+    if ($NoLogonBanner) {
         $blank = 'Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name legalnoticecaption -Value ""; Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name legalnoticetext -Value ""'
         Invoke-Expression $blank
         $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($blank))

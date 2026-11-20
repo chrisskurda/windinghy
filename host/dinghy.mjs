@@ -6,7 +6,7 @@
 //
 // Commands:
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
-//                               (--no-banner: also blank the Windows logon banner; opt-in)
+//                               (--no-banner or config suppressBanner=on: keep the Windows banner suppressed; opt-in, may violate network policy)
 //   dinghy status               guest health / version / metrics
 //   dinghy sync                 fetch app list, (re)generate ~/Applications/WinDinghy/*.app
 //   dinghy launch <name>        launch a synced app
@@ -43,6 +43,7 @@ const DEFAULTS = {
     filter: "on",
     client: "auto",      // auto | native | windows-app
     nativeBin: "",       // path to the patched sdl-freerdp (default: vendor/freerdp/bin)
+    suppressBanner: "off", // on: guest setup also blanks the Windows logon banner (see docs; may violate network policy)
     nativeDebug: "off",  // on: log RAIL window/focus traffic to ~/.config/windinghy/logs/<app>.log
     appsDir: path.join(os.homedir(), "Applications", "WinDinghy"),
 };
@@ -548,8 +549,34 @@ function logTail(file) {
     try { return fs.readFileSync(file, "utf8").split("\n").slice(-40).join("\n"); } catch { return ""; }
 }
 
-async function launchNative(cfg, meta, retried = false) {
-    const bin = nativeBin(cfg);
+// Give the bundle its own copy of the client so macOS shows the app's icon and
+// name in the Dock and menu bar (it keys both off the .app containing the
+// running executable). The copy finds its dylibs via a Contents/lib symlink.
+function bundleClient(bin, bundleDir) {
+    try {
+        const contents = path.resolve(bundleDir, "..");
+        if (!contents.endsWith(".app/Contents")) return bin;
+        const dest = path.join(contents, "MacOS", "freerdp");
+        const src = fs.statSync(bin);
+        let stale = true;
+        try { const d = fs.statSync(dest); stale = d.size !== src.size || d.mtimeMs < src.mtimeMs; } catch {}
+        if (stale) {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.copyFileSync(bin, dest);
+            fs.chmodSync(dest, 0o755);
+            spawnSync("codesign", ["--force", "--sign", "-", dest], { stdio: "ignore" });
+        }
+        const lib = path.join(contents, "lib");
+        const target = path.resolve(path.dirname(bin), "..", "lib");
+        let cur = null;
+        try { cur = fs.readlinkSync(lib); } catch {}
+        if (cur !== target) { fs.rmSync(lib, { force: true, recursive: true }); fs.symlinkSync(target, lib); }
+        return dest;
+    } catch { return bin; }
+}
+
+async function launchNative(cfg, meta, bundleDir, retried = false) {
+    const bin = bundleClient(nativeBin(cfg), bundleDir);
     if (!cfg.username) { notify(`Set your Windows login first: dinghy config username <domain\\user>`); process.exit(1); }
     const pw = getPassword(cfg, retried);
     if (!pw) { notify("No Windows password saved. Run: dinghy login"); process.exit(1); }
@@ -558,7 +585,7 @@ async function launchNative(cfg, meta, retried = false) {
     const logFile = path.join(LOG_DIR, `${safeName(meta.Name ?? "desktop")}.log`);
     const fd = fs.openSync(logFile, "w");
     // Credentials go in over stdin (/args-from) so they never appear in `ps`.
-    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd] });
+    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd], env: { ...process.env, WINDINGHY_APP_NAME: meta.Name ?? "Windows Desktop" } });
     child.stdin.end(nativeArgs(cfg, meta, pw).join("\n") + "\n");
     child.unref();
     bumpUsage(meta.Name ?? "Windows Desktop");
@@ -585,9 +612,12 @@ async function launchNative(cfg, meta, retried = false) {
     const log = logTail(logFile);
     if (/LOGON_FAILURE|ACCESS_DENIED|0x00020014/.test(log) && !retried) {
         keychainDelete(winUser(cfg));
-        return launchNative(cfg, meta, true);
+        return launchNative(cfg, meta, bundleDir, true);
     }
-    if (/LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT/.test(log)) {
+    if (/DISCONNECT_BY_USER|LAST-WINDOW-CLOSED/.test(log) && !/ERRINFO_LOGOFF_BY_USER\b/.test(log)) {
+        return; // the user closed the app: a normal end, not an error
+    }
+    if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(log)) {
         notify(`Windows ended the session. If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.`);
     } else if (/0x1807|SECURITY/.test(log)) {
         notify("Connection failed with a security error. Check the VM clock (dinghy doctor).");
@@ -620,7 +650,7 @@ async function cmdOpenRdp(cfg, bundleDir) {
         }
     }
     if (useNative(cfg)) {
-        await launchNative(cfg, meta);
+        await launchNative(cfg, meta, bundleDir);
         return;
     }
     const rdp = meta.desktop ? rdpForDesktop(cfg) : rdpForApp(cfg, meta);
@@ -707,6 +737,12 @@ function detectServeIp(cfg) {
 // With json=true (used by the menu-bar app) the first stdout line is
 // machine-readable: {"url": ..., "oneliner": ...}; human logs are suppressed.
 async function cmdServeSetup(cfg, json = false, noBanner = false) {
+    noBanner = noBanner || cfg.suppressBanner === "on";
+    if (noBanner && !json) {
+        console.log("WARNING: logon-banner suppression is ON. The Windows banner may be your organization's");
+        console.log("acceptable-use / network policy notice; hiding it may violate that policy. The guest will");
+        console.log("ask you to type YES before it applies this, and keeps it suppressed with a scheduled task.\n");
+    }
     if (!fs.existsSync(path.join(PAYLOAD_DIR, "setup.ps1")))
         throw new Error(`Guest payload not found at ${PAYLOAD_DIR} — run from a full windinghy checkout.`);
     const ip = detectServeIp(cfg);

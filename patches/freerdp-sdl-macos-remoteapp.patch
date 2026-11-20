@@ -1,8 +1,22 @@
 diff --git a/client/SDL/SDL3/sdl_context.cpp b/client/SDL/SDL3/sdl_context.cpp
-index bcb37bf..9259dfb 100644
+index bcb37bf..718b5c7 100644
 --- a/client/SDL/SDL3/sdl_context.cpp
 +++ b/client/SDL/SDL3/sdl_context.cpp
-@@ -388,8 +388,11 @@ BOOL SdlContext::postConnect(freerdp* instance)
+@@ -135,7 +135,12 @@ void SdlContext::setMetadata()
+ 		wmclass = SDL_CLIENT_UUID;
+ 
+ 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_IDENTIFIER_STRING, wmclass);
+-	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING, SDL_CLIENT_NAME);
++	{
++		/* WinDinghy: name the app after the Windows program (menu bar, app menu). */
++		const char* appName = getenv("WINDINGHY_APP_NAME");
++		SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_NAME_STRING,
++		                           (appName && *appName) ? appName : SDL_CLIENT_NAME);
++	}
+ 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_VERSION_STRING, SDL_CLIENT_VERSION);
+ 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_CREATOR_STRING, SDL_CLIENT_VENDOR);
+ 	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_COPYRIGHT_STRING, SDL_CLIENT_COPYRIGHT);
+@@ -388,8 +393,11 @@ BOOL SdlContext::postConnect(freerdp* instance)
  
  	if (!sdl->setResizeable(false))
  		return FALSE;
@@ -17,7 +31,7 @@ index bcb37bf..9259dfb 100644
  		return FALSE;
  	sdl->setConnected(true);
 diff --git a/client/SDL/SDL3/sdl_rail.cpp b/client/SDL/SDL3/sdl_rail.cpp
-index 2fa1bd2..dd348dc 100644
+index 2fa1bd2..6b251ba 100644
 --- a/client/SDL/SDL3/sdl_rail.cpp
 +++ b/client/SDL/SDL3/sdl_rail.cpp
 @@ -16,6 +16,12 @@
@@ -85,8 +99,47 @@ index 2fa1bd2..dd348dc 100644
  	if (!sdl_push_user_event(SDL_EVENT_USER_UPDATE))
  		WLog_WARN(TAG, "sdl_push_user_event failed");
  }
+@@ -613,6 +650,38 @@ bool SdlRail::paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat,
+ 	/* Windows displaced by a same-id recreate (addWindow) also die here, on the main thread. */
+ 	_deadWindows.clear();
+ 
++	/* WinDinghy: one client process per launched app. When the app's last window is gone, end the
++	 * connection instead of lingering (blank Dock icon) until the server notices ~20s later. */
++	{
++		size_t appWindows = 0;
++		for (auto& [wid, win] : _windows)
++			if (!win.isDeleted() && !win.isPopup() && win.window() &&
++			    (SDL_GetWindowFlags(win.window()) & SDL_WINDOW_HIDDEN) == 0)
++				appWindows++;
++		const uint64_t now = SDL_GetTicks();
++		if (appWindows > 0)
++		{
++			_sawAppWindow = true;
++			_noAppSince = 0;
++		}
++		else if (_sawAppWindow)
++		{
++			if (_noAppSince == 0)
++			{
++				_noAppSince = now;
++				/* An idle session does not repaint: wake up to re-check after the grace period. */
++				if (!sdl_push_update_after(3100))
++					WLog_WARN(TAG, "SDL_AddTimer failed: %s", SDL_GetError());
++			}
++			else if (now - _noAppSince > 3000)
++			{
++				WLog_WARN(TAG, "WINDINGHY-LAST-WINDOW-CLOSED, disconnecting");
++				_sawAppWindow = false;
++				freerdp_abort_connect_context(_context->context());
++			}
++		}
++	}
++
+ 	/* App windows first so popup parents exist before their popups. */
+ 	for (auto& it : _windows)
+ 	{
 diff --git a/client/SDL/SDL3/sdl_rail.hpp b/client/SDL/SDL3/sdl_rail.hpp
-index 59d07cb..67c6996 100644
+index 59d07cb..bdce707 100644
 --- a/client/SDL/SDL3/sdl_rail.hpp
 +++ b/client/SDL/SDL3/sdl_rail.hpp
 @@ -66,6 +66,7 @@ class SdlRail
@@ -97,6 +150,15 @@ index 59d07cb..67c6996 100644
  
  	/* Paint all RAIL windows (window-mapped GFX surface, or legacy desktop region).
  	 * `damage` = server-updated desktop rects for this cycle (empty = nothing new). */
+@@ -240,6 +241,8 @@ class SdlRail
+ 	bool _refreshSent = false; /* one full RefreshRect per connection, at first window realize */
+ 	std::atomic<bool> _appStarted = false;
+ 	/* The desktop window may show: RAIL started, a logon prompt, or the hold ran out. */
++	bool _sawAppWindow = false;
++	uint64_t _noAppSince = 0;
+ 	std::atomic<bool> _desktopReleased = false;
+ 	std::atomic<uint64_t> _desktopHoldUntil = 0; /* end of the logon desktop hold (ticks) */
+ 	std::atomic<bool> _displayRequested = false;
 diff --git a/client/SDL/SDL3/sdl_window.cpp b/client/SDL/SDL3/sdl_window.cpp
 index 34e8c65..38f71dd 100644
 --- a/client/SDL/SDL3/sdl_window.cpp
