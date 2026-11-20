@@ -75,6 +75,13 @@ bumps may include breaking changes).
 - The native client no longer shows FreeRDP's unscaled "connection is being
   established" dialog.
 
+- WIP: a VM WinDinghy manages itself on QEMU + Hypervisor.framework (no UTM):
+  `dinghy vm create|start|stop|status|screenshot|use|destroy`. Headless, user-mode
+  networking with forwarded ports (127.0.0.1:13389 RDP, :17148 guest API, so the
+  address never changes), QEMU guest agent for exec/files, unattended Windows 11
+  install (answer-file CD built with hdiutil). Verified: headless boot, QMP, keys,
+  screenshots. Not yet verified: the full Windows install (needs an ARM64 ISO).
+
 ### Fixed
 
 - The native client exits about 3 seconds after an app's last window closes

@@ -5,6 +5,7 @@
 // launchers that open as RemoteApp windows via Microsoft's "Windows App".
 //
 // Commands:
+//   dinghy vm <create|start|stop|status|screenshot|use|destroy>  the VM WinDinghy manages itself (QEMU, no UTM)
 //   dinghy setup                hands-free setup via the UTM guest agent (falls back to serve-setup)
 //   dinghy fix [session|rdp|clock|server]  repair common guest problems via the guest agent
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
@@ -25,6 +26,7 @@ import { execFileSync, spawnSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import * as G from "./guest.mjs";
+import * as VM from "./vm.mjs";
 
 // Single source of truth for the WinDinghy version. Release: bump this,
 // move CHANGELOG "Unreleased" entries under the new version, tag vX.Y.Z.
@@ -46,6 +48,8 @@ const DEFAULTS = {
     scale: "",
     promptcreds: "on",
     vmName: "Windows",
+    vmBackend: "utm",    // utm (a VM you run in UTM) or qemu (the VM WinDinghy manages: dinghy vm create)
+    vmDir: "",           // where the managed VM lives (default ~/Library/Application Support/WinDinghy/vm)
     vmMac: "",           // learned automatically: the VM's MAC, used to find it when its IP changes
     filter: "on",
     client: "auto",      // auto | native | windows-app
@@ -454,6 +458,7 @@ function learnGuest(cfg, ip) {
 }
 
 async function discoverGuest(cfg) {
+    if (G.backendKind() === "qemu") return null; // fixed forwarded address: nothing to discover
     if (cfg.vmMac) {
         const ip = await ipForMac(cfg, normMac(cfg.vmMac));
         if (ip) return ip;
@@ -498,6 +503,7 @@ async function findGuest(cfg, timeoutMs = 2500) {
 }
 
 function utmctlStart(cfg) {
+    if (G.backendKind() === "qemu") return G.startVm(cfg.vmName);
     // Fire-and-forget: utmctl can block on automation-permission prompts,
     // so never wait on it directly.
     const utmctl = "/Applications/UTM.app/Contents/MacOS/utmctl";
@@ -880,8 +886,8 @@ function detectServeIp(cfg) {
 // With json=true (used by the menu-bar app) the first stdout line is
 // machine-readable: {"url": ..., "oneliner": ...}; human logs are suppressed.
 // Serves the guest payload (setup.ps1, payload.zip) and receives the logon banner.
-function startSetupServer(cfg, ip, noBanner, log = true) {
-    const baseUrl = `http://${ip}:${SETUP_PORT}`;
+function startSetupServer(cfg, ip, noBanner, log = true, guestUrl = null) {
+    const baseUrl = guestUrl ?? `http://${ip}:${SETUP_PORT}`;
     const setupTemplate = fs.readFileSync(path.join(PAYLOAD_DIR, "setup.ps1"), "utf8");
     const setupScript = setupTemplate.replace("__BASE_URL__", baseUrl).replace("__NO_BANNER__", noBanner ? "$true" : "$false");
 
@@ -970,6 +976,187 @@ async function cmdServeSetup(cfg, json = false, noBanner = false) {
     if (!json) console.log(`Guest server is UP. Running first sync ...`);
     server.close();
     await cmdSync(cfg);
+}
+
+// ---------- managed VM (QEMU + Hypervisor.framework, no UTM) ----------
+// `dinghy vm create` builds a lean Windows 11 IoT Enterprise LTSC (ARM64) VM, installs it
+// unattended, and switches WinDinghy over to it. See host/vm.mjs.
+
+const EVAL_PAGE = "https://www.microsoft.com/en-us/evalcenter/download-windows-11-iot-enterprise-ltsc-eval";
+const VIRTIO_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso";
+const BACKEND_KEYS = ["host", "rdpPort", "apiPort", "username", "vmName", "vmMac"];
+
+// Remember the settings of the backend we're leaving and load the other one's.
+function switchBackend(cfg, to, defaults = {}) {
+    const from = cfg.vmBackend || "utm";
+    cfg.profiles = cfg.profiles ?? {};
+    cfg.profiles[from] = Object.fromEntries(BACKEND_KEYS.map(k => [k, cfg[k]]));
+    Object.assign(cfg, cfg.profiles[to] ?? {}, defaults);
+    cfg.vmBackend = to;
+    saveConfig(cfg);
+    G.useBackend(cfg);
+}
+
+function findWindowsIso() {
+    const dirs = [path.join(os.homedir(), "Downloads"), path.join(os.homedir(), "Desktop")];
+    const hits = [];
+    for (const d of dirs) {
+        let names = [];
+        try { names = fs.readdirSync(d); } catch {}
+        for (const n of names) {
+            if (!/\.iso$/i.test(n)) continue;
+            const full = path.join(d, n);
+            let size = 0;
+            try { size = fs.statSync(full).size; } catch {}
+            if (size > 3e9 && /(iot|ltsc|win(dows)?[-_ ]?11|a64|arm64)/i.test(n) && /(a64|arm)/i.test(n)) hits.push({ full, mtime: fs.statSync(full).mtimeMs });
+        }
+    }
+    return hits.sort((a, b) => b.mtime - a.mtime)[0]?.full ?? null;
+}
+
+async function waitForIsoDownload() {
+    say("No Windows ISO found. Opening Microsoft's evaluation page: pick");
+    say("  \"Windows 11 IoT Enterprise LTSC 2024\" -> ISO, 64-bit ARM64, then download it.");
+    say("  I'll continue automatically when it lands in ~/Downloads (waiting up to 40 minutes).");
+    spawnSync("open", [EVAL_PAGE]);
+    const end = Date.now() + 40 * 60 * 1000;
+    while (Date.now() < end) {
+        await new Promise(r => setTimeout(r, 5000));
+        const iso = findWindowsIso();
+        if (iso) {
+            // Wait until the size stops changing (the browser is done writing it).
+            let last = -1;
+            for (let i = 0; i < 40; i++) {
+                const sz = fs.statSync(iso).size;
+                if (sz === last) return iso;
+                last = sz;
+                await new Promise(r => setTimeout(r, 3000));
+            }
+            return iso;
+        }
+    }
+    throw new Error("No Windows ISO appeared in ~/Downloads. Download it, then run: dinghy vm create --iso <path>");
+}
+
+async function ensureVirtioIso() {
+    const dest = path.join(VM.cacheDir(), "virtio-win.iso");
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 3e8) return dest;
+    fs.mkdirSync(VM.cacheDir(), { recursive: true });
+    say("Downloading the virtio driver ISO (~700 MB, one time)...");
+    const r = spawnSync("curl", ["-fL", "--retry", "3", "-o", dest + ".part", VIRTIO_URL], { stdio: "inherit" });
+    if (r.status !== 0) throw new Error("Couldn't download the virtio driver ISO.");
+    fs.renameSync(dest + ".part", dest);
+    return dest;
+}
+
+async function guestApiUp(cfg) {
+    try { return (await fetch(`http://127.0.0.1:${VM.API_PORT}/health`, { signal: AbortSignal.timeout(2500) })).ok; } catch { return false; }
+}
+
+async function vmCreate(cfg, args) {
+    const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
+    const gb = Number(opt("--disk", 40)), ramMB = Number(opt("--ram", 4096)), cpus = Number(opt("--cpus", 4));
+    if (VM.exists(cfg)) throw new Error("A WinDinghy VM already exists. Use: dinghy vm start   (or dinghy vm destroy --yes to start over)");
+
+    stepSay("Checking QEMU");
+    if (!VM.tools().ok) {
+        say("    Installing QEMU with Homebrew (one time)...");
+        const r = spawnSync("brew", ["install", "qemu"], { stdio: "inherit" });
+        if (r.status !== 0 || !VM.tools().ok) throw new Error("Couldn't install QEMU. Install Homebrew (https://brew.sh) and run: brew install qemu");
+    }
+
+    stepSay("Windows installation media");
+    let iso = opt("--iso", null) ?? findWindowsIso();
+    if (!iso) iso = await waitForIsoDownload();
+    if (!fs.existsSync(iso)) throw new Error(`ISO not found: ${iso}`);
+    say(`    ${iso}`);
+    const virtio = await ensureVirtioIso();
+
+    stepSay("Preparing the VM");
+    const user = "WinDinghy";
+    const password = randomPassword();
+    if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
+    VM.createDisk(cfg, gb);
+    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT });
+    const { server } = startSetupServer(cfg, "127.0.0.1", false, false, `http://10.0.2.2:${SETUP_PORT}`);
+    try {
+        VM.start(cfg, { windows: iso, unattend, virtio }, { ramMB, cpus });
+        say("    VM started (headless). Pressing a key for the installer's boot prompt...");
+        for (let i = 0; i < 25; i++) { VM.sendKeys(cfg, ["spc"]); await new Promise(r => setTimeout(r, 1200)); }
+
+        stepSay("Installing Windows (unattended; usually 15-30 minutes)");
+        const started = Date.now();
+        let lastShot = 0;
+        for (;;) {
+            await new Promise(r => setTimeout(r, 15000));
+            const mins = Math.round((Date.now() - started) / 60000);
+            if (await guestApiUp(cfg)) { say(`    guest server is up after ${mins} min`); break; }
+            if (!VM.isRunning(cfg)) throw new Error(`The VM stopped during installation. Log: ${VM.files(cfg).log}`);
+            if (Date.now() - lastShot > 120000) { VM.screenshot(cfg); lastShot = Date.now(); say(`    ...${mins} min (progress screenshot: dinghy vm screenshot)`); }
+            if (mins > 150) throw new Error("Installation is taking far too long. Check: dinghy vm screenshot");
+        }
+    } finally {
+        server.close();
+    }
+
+    stepSay("Finishing up");
+    cfg.vmName = VM.VM_NAME;
+    switchBackend(cfg, "qemu", { host: "127.0.0.1", rdpPort: VM.RDP_PORT, apiPort: VM.API_PORT, username: user, vmName: VM.VM_NAME, vmMac: "" });
+    say("    Restarting the VM without the install media...");
+    G.ps(VM.VM_NAME, "Stop-Computer -Force", { timeout: 30000 });
+    for (let i = 0; i < 60 && VM.isRunning(cfg); i++) await new Promise(r => setTimeout(r, 2000));
+    VM.stop(cfg, 5);
+    VM.start(cfg, {}, { ramMB, cpus });
+    if (!await waitFor(() => guestApiUp(cfg), 300, 5000)) throw new Error("The VM didn't come back after the restart. Try: dinghy vm start");
+
+    stepSay("Syncing your Windows apps");
+    await cmdSync(cfg);
+    say(`\nDone. Your WinDinghy VM runs without UTM (disk: ${VM.files(cfg).disk}).`);
+}
+
+async function cmdVm(cfg, args) {
+    const sub = args[0] ?? "status";
+    switch (sub) {
+        case "create": return vmCreate(cfg, args.slice(1));
+        case "start": {
+            if (!VM.exists(cfg)) throw new Error("No WinDinghy VM yet. Create it with: dinghy vm create");
+            VM.start(cfg);
+            say("Starting...");
+            if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("The VM started but the guest server didn't answer in 5 minutes.");
+            say("Online.");
+            return;
+        }
+        case "stop": say(VM.stop(cfg) ? "Stopped." : "Couldn't stop the VM."); return;
+        case "status": {
+            const f = VM.files(cfg);
+            if (!VM.exists(cfg)) { say("No WinDinghy VM yet. Create it with: dinghy vm create"); return; }
+            const size = fs.statSync(f.disk).size;
+            say(`WinDinghy VM: ${VM.isRunning(cfg) ? `running (pid ${VM.pidOf(cfg)})` : "stopped"}`);
+            say(`disk: ${f.disk} (${(size / 1e9).toFixed(1)} GB used)`);
+            say(`active backend: ${cfg.vmBackend || "utm"}; RDP 127.0.0.1:${VM.RDP_PORT}, guest API 127.0.0.1:${VM.API_PORT}`);
+            return;
+        }
+        case "screenshot": {
+            const file = VM.screenshot(cfg, args[1] ? path.resolve(args[1]) : undefined);
+            if (!file) throw new Error("Couldn't take a screenshot (is the VM running?).");
+            say(file); spawnSync("open", [file]); return;
+        }
+        case "use": {
+            const to = args[1];
+            if (!["utm", "qemu"].includes(to)) throw new Error("Usage: dinghy vm use <utm|qemu>");
+            switchBackend(cfg, to);
+            say(`Now using the ${to} backend (host ${cfg.host}).`);
+            return;
+        }
+        case "destroy":
+            if (!args.includes("--yes")) throw new Error("This deletes the WinDinghy VM and its disk. Re-run with --yes to confirm.");
+            VM.destroy(cfg);
+            if (cfg.vmBackend === "qemu") switchBackend(cfg, "utm");
+            say("Deleted.");
+            return;
+        default:
+            throw new Error("Usage: dinghy vm <create|start|stop|status|screenshot|use|destroy>");
+    }
 }
 
 // ---------- hands-free setup and repair (UTM guest agent) ----------
@@ -1223,6 +1410,7 @@ function cmdConfig(cfg, key, value) {
 
 const [cmd, ...rest] = process.argv.slice(2);
 const cfg = loadConfig();
+G.useBackend(cfg);
 
 try {
     switch (cmd) {
@@ -1238,6 +1426,7 @@ try {
         case "update":      cmdUpdate(); break;
         case "login":       cmdLogin(cfg); break;
         case "setup":       await cmdSetup(cfg, rest); break;
+        case "vm":          await cmdVm(cfg, rest); break;
         case "fix":         await cmdFix(cfg, rest); break;
         case "version":
         case "--version":
