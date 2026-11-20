@@ -1,5 +1,5 @@
 diff --git a/client/SDL/SDL3/sdl_context.cpp b/client/SDL/SDL3/sdl_context.cpp
-index bcb37bf..53e05ab 100644
+index bcb37bf..c45876d 100644
 --- a/client/SDL/SDL3/sdl_context.cpp
 +++ b/client/SDL/SDL3/sdl_context.cpp
 @@ -135,7 +135,12 @@ void SdlContext::setMetadata()
@@ -16,7 +16,20 @@ index bcb37bf..53e05ab 100644
  	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_VERSION_STRING, SDL_CLIENT_VERSION);
  	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_CREATOR_STRING, SDL_CLIENT_VENDOR);
  	SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_COPYRIGHT_STRING, SDL_CLIENT_COPYRIGHT);
-@@ -388,8 +393,11 @@ BOOL SdlContext::postConnect(freerdp* instance)
+@@ -323,7 +328,11 @@ BOOL SdlContext::preConnect(freerdp* instance)
+ 	{
+ 		sdl->getDialog().create(instance->context);
+ 		sdl->getDialog().setTitle("Connecting to '%s'", freerdp_settings_get_server_name(settings));
+-		sdl->getDialog().showInfo("The connection is being established\n\nPlease wait...");
++		/* WinDinghy: the launcher reports connection problems itself; this dialog is unscaled on
++		 * Retina and only shows a spinner. */
++		const char* quiet = getenv("WINDINGHY_NO_ERROR_DIALOGS");
++		if (!(quiet && quiet[0] == '1'))
++			sdl->getDialog().showInfo("The connection is being established\n\nPlease wait...");
+ 	}
+ 
+ 	/* TODO: Any code your client requires */
+@@ -388,8 +397,11 @@ BOOL SdlContext::postConnect(freerdp* instance)
  
  	if (!sdl->setResizeable(false))
  		return FALSE;
@@ -30,7 +43,7 @@ index bcb37bf..53e05ab 100644
  	                        true))
  		return FALSE;
  	sdl->setConnected(true);
-@@ -754,6 +762,13 @@ void SdlContext::sdl_client_cleanup(int exit_code, const std::string& error_msg)
+@@ -754,6 +766,13 @@ void SdlContext::sdl_client_cleanup(int exit_code, const std::string& error_msg)
  				break;
  			default:
  			{

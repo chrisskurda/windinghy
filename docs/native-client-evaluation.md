@@ -63,3 +63,14 @@ macOS Space under every RemoteApp window:
   Suspects: popup/owner z-order or activation sent for the wrong window id
   (sdl_rail_window.cpp), or the Enter sent by the banner auto-accept landing
   in Edge.
+
+## Clock drift (guest)
+
+- A Mac sleeping (including Maintenance Sleep / DarkWake cycles) pauses the VM, so the
+  guest clock falls behind by the sleep time. A skew over a few minutes breaks CredSSP
+  (RDP 0x1807) and the client just hangs on "connecting".
+- On a domain-joined VM, Group Policy sets W32Time (`Type NTP`, `NtpServer` an internal
+  address, `SpecialPollInterval 3600`, all "(Policy)"), overriding `setup.ps1`'s 60 s poll,
+  and the internal NTP server is unreachable off the district network.
+- Fix: push the Mac's clock in through the guest agent (`Set-Date` as SYSTEM): before each
+  launch, after wake, and via `dinghy fix clock`.

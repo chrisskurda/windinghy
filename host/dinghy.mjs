@@ -754,19 +754,21 @@ async function cmdOpenRdp(cfg, bundleDir) {
         notify(`Can't reach the Windows VM. Start it in UTM, then try again.`);
         process.exit(1);
     }
-    // Hold the launch while a drifted clock heals (guest resyncs every 60s)
-    // instead of letting the connection fail.
-    let skew = await guestClockSkew(cfg);
-    if (skew > 120) {
-        notify(`Windows clock is off by ${Math.round(skew)}s — waiting for it to resync…`);
-        const deadline = Date.now() + 75_000;
-        while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 5000));
-            skew = await guestClockSkew(cfg);
-            if (skew <= 120) break;
-        }
+    // A drifted guest clock breaks CredSSP with opaque errors (0x1807). Set it from the
+    // Mac through the guest agent; without the agent, wait for the guest to resync.
+    if (!await ensureGuestClock(cfg)) {
+        let skew = await guestClockSkew(cfg);
         if (skew > 120) {
-            notify(`Clock still drifted — the connection may fail with a security error (0x1807). Restart the VM, or re-run "Set Up Windows VM…" to install the faster time sync.`);
+            notify(`Windows clock is off by ${Math.round(skew)}s: waiting for it to resync…`);
+            const deadline = Date.now() + 75_000;
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 5000));
+                skew = await guestClockSkew(cfg);
+                if (skew <= 120) break;
+            }
+            if (skew > 120) {
+                notify(`Clock still drifted: the connection may fail with a security error (0x1807). Run "dinghy fix clock" (needs UTM Guest Tools) or restart the VM.`);
+            }
         }
     }
     if (useNative(cfg)) {
@@ -820,7 +822,7 @@ async function cmdDoctor(cfg) {
             const guestTime = new Date(res.headers.get("date")).getTime();
             const skew = Math.abs(Date.now() - guestTime) / 1000;
             add(skew < 120, `guest clock skew ${Math.round(skew)}s`,
-                "Guest clock has drifted — RDP auth will fail with security errors. Run: dinghy fix clock");
+                "Guest clock has drifted (a sleeping Mac pauses the VM; domain policy can block time sync). Run: dinghy fix clock");
         } catch {}
     }
     if (G.utmInstalled() && G.vmStatus(cfg.vmName) === "started") {
@@ -1103,7 +1105,33 @@ function consoleSessionId(cfg, vm) {
     return null;
 }
 
+// The domain's Group Policy often forces W32Time to an internal NTP server and a slow poll,
+// and a sleeping Mac pauses the VM, so the guest clock falls behind. The Mac's clock is the
+// reliable one: push it into the guest through the agent.
+function setGuestClock(vmName) {
+    const iso = new Date(Date.now() + 1000).toISOString(); // + ~1s for the exec round trip
+    const r = G.ps(vmName, `$t=[DateTimeOffset]::Parse('${iso}'); Set-Date -Date $t.LocalDateTime | Out-Null; 'clock set'`, { timeout: 60000 });
+    return /clock set/.test(r.output);
+}
+
+// Used at launch: returns true if the clock is (or was just made) right.
+async function ensureGuestClock(cfg) {
+    let skew = await guestClockSkew(cfg);
+    if (skew <= 60) return true;
+    if (G.utmInstalled() && cfg.vmName && G.agentUp(cfg.vmName)) {
+        notify(`Windows clock is off by ${Math.round(skew)}s: setting it from your Mac…`);
+        if (setGuestClock(cfg.vmName)) return (await guestClockSkew(cfg)) <= 60;
+    }
+    return false;
+}
+
 async function cmdFix(cfg, args) {
+    if (args.includes("--quiet")) {
+        // For background callers (e.g. after the Mac wakes): fix the clock only, no dialogs, no output.
+        if (G.utmInstalled() && cfg.vmName && G.vmStatus(cfg.vmName) === "started" && G.agentUp(cfg.vmName)
+            && await findGuest(cfg) && await guestClockSkew(cfg) > 30) setGuestClock(cfg.vmName);
+        return;
+    }
     const which = args[0] && !args[0].startsWith("-") ? args[0] : "all";
     const valid = ["all", "session", "rdp", "clock", "server"];
     if (!valid.includes(which)) throw new Error(`Usage: dinghy fix [${valid.join("|")}]`);
@@ -1126,8 +1154,8 @@ async function cmdFix(cfg, args) {
     if (all || which === "clock") {
         const skew = await guestClockSkew(cfg);
         if (skew > 60 || !all) {
-            stepSay(`Resyncing the Windows clock${skew ? ` (off by ${Math.round(skew)}s)` : ""}`);
-            G.ps(vm, `w32tm /resync /force`);
+            stepSay(`Setting the Windows clock from your Mac${skew ? ` (off by ${Math.round(skew)}s)` : ""}`);
+            say(`    ${setGuestClock(vm) ? "done" : "couldn't set the clock"}`);
             fixed++;
         }
     }

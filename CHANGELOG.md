@@ -66,6 +66,15 @@ bumps may include breaking changes).
   names so Homebrew isn't needed to run it) and ships it, plus the guest payload,
   inside WinDinghy.app. `dinghy` prefers the bundled client automatically.
 
+- Guest clock drift is fixed at the source: the Mac pushes its own time into the
+  guest through the agent (`dinghy fix clock`), automatically before each launch
+  when the drift exceeds a minute, and from the menu-bar app a few seconds after
+  the Mac wakes. (A sleeping Mac pauses the VM, and domain Group Policy can pin
+  W32Time to an internal NTP server with a slow poll, so the guest can't recover
+  on its own.)
+- The native client no longer shows FreeRDP's unscaled "connection is being
+  established" dialog.
+
 ### Fixed
 
 - The native client exits about 3 seconds after an app's last window closes

@@ -231,6 +231,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         poll()
         updateBadge()
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.poll() }
+        // A sleeping Mac pauses the VM, so its clock falls behind; push the Mac's time in once we're awake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self?.fixClockAfterWake() }
+        }
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.updateBadge() }
     }
 
@@ -267,6 +272,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 self.metricsLine = ""
                 self.rediscoverGuest()
             }
+        }
+    }
+
+    func fixClockAfterWake() {
+        guard let node = findNode(), let dinghy = findDinghy() else { return }
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: node)
+            p.arguments = [dinghy, "fix", "clock", "--quiet"]
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            try? p.run()
+            p.waitUntilExit()
         }
     }
 
