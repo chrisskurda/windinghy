@@ -10,6 +10,31 @@ bumps may include breaking changes).
 
 ### Added
 
+- Native RemoteApp client (opt-in/auto): launches use a patched FreeRDP
+  `sdl-freerdp` instead of Windows App, so each Windows window is a real
+  macOS window. Build it with `scripts/build-freerdp.sh` (patch in `patches/`,
+  notes in `docs/native-client-evaluation.md`); `dinghy config client
+  native|windows-app|auto` and `nativeBin` control it. `auto` uses it when
+  built.
+- Credentials for the native client live in the macOS Keychain
+  (`dinghy login`, or prompted on first launch) and reach FreeRDP over stdin,
+  never on the command line. A rejected password is re-prompted once.
+- Logon banner: `setup.ps1` reports the guest's legal-notice text; WinDinghy
+  shows it in a native dialog before a new session and, once accepted, the
+  client dismisses the matching Windows dialog. `dinghy serve-setup
+  --no-banner` (opt-in) blanks the banner on the guest instead.
+- Failed native launches explain themselves (bad password, same-user console
+  session on the VM, clock drift).
+
+### Fixed
+
+- Guest setup no longer kills its own RDP session: when run over RDP the
+  TermService restart is deferred to a one-shot task.
+- `dinghy serve-setup` now re-discovers the VM when its IP changed instead of
+  waiting on the stale address.
+
+### Added
+
 - Self-update: "Check for Updates…" in the menu bar, or `dinghy update` /
   `./update` from the terminal. Fast-forwards from `origin/main`, rebuilds
   the menu-bar app, and relaunches it if it was running; refuses to touch a

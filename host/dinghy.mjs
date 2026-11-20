@@ -6,10 +6,12 @@
 //
 // Commands:
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
+//                               (--no-banner: also blank the Windows logon banner; opt-in)
 //   dinghy status               guest health / version / metrics
 //   dinghy sync                 fetch app list, (re)generate ~/Applications/WinDinghy/*.app
 //   dinghy launch <name>        launch a synced app
 //   dinghy desktop              open a full Windows desktop session
+//   dinghy login                save the Windows password in the macOS Keychain (native client)
 //   dinghy config [key value]   show or set config (host, username, appsDir, ...)
 
 import fs from "node:fs";
@@ -39,6 +41,9 @@ const DEFAULTS = {
     promptcreds: "on",
     vmName: "Windows",
     filter: "on",
+    client: "auto",      // auto | native | windows-app
+    nativeBin: "",       // path to the patched sdl-freerdp (default: vendor/freerdp/bin)
+    nativeDebug: "off",  // on: log RAIL window/focus traffic to ~/.config/windinghy/logs/<app>.log
     appsDir: path.join(os.homedir(), "Applications", "WinDinghy"),
 };
 
@@ -378,6 +383,20 @@ async function discoverGuest(cfg) {
     return null;
 }
 
+// Like guestAlive, but also re-discovers the VM when its address changed
+// (DHCP reassignment) and updates the saved config.
+async function findGuest(cfg, timeoutMs = 2500) {
+    if (await guestAlive(cfg, timeoutMs)) return true;
+    const found = await discoverGuest(cfg);
+    if (!found) return false;
+    if (found !== cfg.host) {
+        cfg.host = found;
+        saveConfig(cfg);
+        console.log(`VM address changed; config updated to ${found}`);
+    }
+    return true;
+}
+
 function utmctlStart(cfg) {
     // Fire-and-forget: utmctl can block on automation-permission prompts,
     // so never wait on it directly.
@@ -430,6 +449,153 @@ async function guestClockSkew(cfg) {
     } catch { return 0; }
 }
 
+// ---------- native client (patched FreeRDP sdl-freerdp) ----------
+// Replaces Windows App: one process per launch, windows are real macOS windows.
+// See docs/native-client-evaluation.md and patches/ (scripts/build-freerdp.sh).
+
+const KEYCHAIN_SERVICE = "windinghy";
+const LOG_DIR = path.join(CONFIG_DIR, "logs");
+
+function nativeBin(cfg) {
+    const candidates = [cfg.nativeBin, path.join(PROJECT_ROOT, "vendor", "freerdp", "bin", "sdl-freerdp")].filter(Boolean);
+    return candidates.find(c => fs.existsSync(c)) ?? null;
+}
+
+function useNative(cfg) {
+    if (cfg.client === "windows-app") return false;
+    const bin = nativeBin(cfg);
+    if (cfg.client === "native" && !bin) throw new Error("client is 'native' but no sdl-freerdp was found. Run scripts/build-freerdp.sh or: dinghy config nativeBin <path>");
+    return !!bin;
+}
+
+function winUser(cfg) {
+    return (cfg.username || "").replace("/", "\\");
+}
+
+function keychainGet(user) {
+    const r = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", user, "-w"], { encoding: "utf8" });
+    return r.status === 0 ? r.stdout.replace(/\n$/, "") : null;
+}
+
+function keychainSet(user, pw) {
+    // `security -i` reads the command from stdin so the password never shows up in argv.
+    const q = v => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    const r = spawnSync("security", ["-i"], {
+        input: `add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${q(user)} -w ${q(pw)}\n`,
+        encoding: "utf8",
+    });
+    return r.status === 0;
+}
+
+function keychainDelete(user) {
+    spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", user], { stdio: "ignore" });
+}
+
+function asDialog(script) {
+    const r = spawnSync("osascript", ["-e", script], { encoding: "utf8" });
+    return r.status === 0 ? r.stdout.trim() : null;
+}
+
+const asq = t => t.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+function promptPassword(user, retry = false) {
+    const msg = retry ? `Windows rejected the saved password for ${user}. Enter it again:` : `Enter the Windows password for ${user}. It is stored in your macOS Keychain.`;
+    return asDialog(`text returned of (display dialog "${asq(msg)}" default answer "" with hidden answer with title "WinDinghy" buttons {"Cancel", "Save"} default button "Save" cancel button "Cancel")`);
+}
+
+function getPassword(cfg, forcePrompt = false) {
+    const user = winUser(cfg);
+    if (!forcePrompt) {
+        const pw = keychainGet(user);
+        if (pw) return pw;
+    }
+    const pw = promptPassword(user, forcePrompt);
+    if (pw) keychainSet(user, pw);
+    return pw || null;
+}
+
+const BANNER_PATH = path.join(CONFIG_DIR, "banner.json");
+
+// The Windows logon banner (legal notice), reported by the guest during setup.
+// Shown natively when the server actually asks for it (the client logs a marker);
+// accepting signals the client to dismiss the matching Windows dialog.
+function readBanner() {
+    try { return JSON.parse(fs.readFileSync(BANNER_PATH, "utf8")); } catch { return null; }
+}
+
+function nativeBannerAccepted(b) {
+    const clean = t => String(t ?? "").replace(/\0/g, "").replace(/\r\n?/g, "\n");
+    const body = clean(b.text).trim().slice(0, 3000);
+    const out = asDialog(`button returned of (display dialog "${asq(body)}" with title "${asq(clean(b.caption) || "Windows logon notice")}" buttons {"Decline", "Accept"} default button "Accept" cancel button "Decline")`);
+    return out === "Accept";
+}
+
+function nativeArgs(cfg, meta, pw) {
+    const a = [`/v:${cfg.host}`, `/port:${cfg.rdpPort}`];
+    if (cfg.username) a.push(`/u:${winUser(cfg)}`);
+    a.push(`/p:${pw}`, "/cert:ignore", `/scale-desktop:${cfg.scale || 100}`, "/scale-device:100", "+clipboard", "/gfx", "/log-level:WARN");
+    if (cfg.nativeDebug === "on") a.push("/log-filters:com.freerdp.client.sdl.rail:DEBUG,com.freerdp.channels.rail.client:DEBUG");
+    if (meta.desktop) {
+        a.push("/size:1440x900", "/dynamic-resolution");
+    } else {
+        const clean = v => String(v ?? "").replace(/,/g, " ");
+        a.push(`/app:program:${meta.Path},name:${clean(meta.Name)}` + (meta.Args ? `,cmd:${meta.Args}` : ""));
+    }
+    return a;
+}
+
+function logTail(file) {
+    try { return fs.readFileSync(file, "utf8").split("\n").slice(-40).join("\n"); } catch { return ""; }
+}
+
+async function launchNative(cfg, meta, retried = false) {
+    const bin = nativeBin(cfg);
+    if (!cfg.username) { notify(`Set your Windows login first: dinghy config username <domain\\user>`); process.exit(1); }
+    const pw = getPassword(cfg, retried);
+    if (!pw) { notify("No Windows password saved. Run: dinghy login"); process.exit(1); }
+
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    const logFile = path.join(LOG_DIR, `${safeName(meta.Name ?? "desktop")}.log`);
+    const fd = fs.openSync(logFile, "w");
+    // Credentials go in over stdin (/args-from) so they never appear in `ps`.
+    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd] });
+    child.stdin.end(nativeArgs(cfg, meta, pw).join("\n") + "\n");
+    child.unref();
+    bumpUsage(meta.Name ?? "Windows Desktop");
+
+    // Watch the first seconds: show the logon banner natively when the server
+    // asks for it, and turn common failures into useful messages.
+    let exited = null, bannerHandled = false;
+    child.on("exit", code => { exited = code ?? -1; });
+    const deadline = Date.now() + 25000;
+    while (exited === null && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 400));
+        if (!bannerHandled && logTail(logFile).includes("WINDINGHY-LOGON-NOTICE")) {
+            bannerHandled = true;
+            const b = readBanner();
+            if (b && (b.text || b.caption)) {
+                if (nativeBannerAccepted(b)) process.kill(child.pid, "SIGUSR1");
+                else { process.kill(child.pid, "SIGTERM"); return; }
+            }
+            // No stored banner text: leave the Windows dialog for the user to click.
+        }
+    }
+    const early = exited;
+    if (early === null) return; // still running: connected
+    const log = logTail(logFile);
+    if (/LOGON_FAILURE|ACCESS_DENIED|0x00020014/.test(log) && !retried) {
+        keychainDelete(winUser(cfg));
+        return launchNative(cfg, meta, true);
+    }
+    if (/LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT/.test(log)) {
+        notify(`Windows ended the session. If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.`);
+    } else if (/0x1807|SECURITY/.test(log)) {
+        notify("Connection failed with a security error. Check the VM clock (dinghy doctor).");
+    } else if (early !== 0) {
+        notify(`Connection failed (see ${logFile})`);
+    }
+}
+
 async function cmdOpenRdp(cfg, bundleDir) {
     const metaPath = path.join(bundleDir, "app.json");
     const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
@@ -452,6 +618,10 @@ async function cmdOpenRdp(cfg, bundleDir) {
         if (skew > 120) {
             notify(`Clock still drifted — the connection may fail with a security error (0x1807). Restart the VM, or re-run "Set Up Windows VM…" to install the faster time sync.`);
         }
+    }
+    if (useNative(cfg)) {
+        await launchNative(cfg, meta);
+        return;
     }
     const rdp = meta.desktop ? rdpForDesktop(cfg) : rdpForApp(cfg, meta);
     const rdpPath = path.join(bundleDir, rdpFileName(meta.desktop ? "Windows Desktop" : meta.Name));
@@ -536,7 +706,7 @@ function detectServeIp(cfg) {
 
 // With json=true (used by the menu-bar app) the first stdout line is
 // machine-readable: {"url": ..., "oneliner": ...}; human logs are suppressed.
-async function cmdServeSetup(cfg, json = false) {
+async function cmdServeSetup(cfg, json = false, noBanner = false) {
     if (!fs.existsSync(path.join(PAYLOAD_DIR, "setup.ps1")))
         throw new Error(`Guest payload not found at ${PAYLOAD_DIR} — run from a full windinghy checkout.`);
     const ip = detectServeIp(cfg);
@@ -544,7 +714,7 @@ async function cmdServeSetup(cfg, json = false) {
 
     const baseUrl = `http://${ip}:${SETUP_PORT}`;
     const setupTemplate = fs.readFileSync(path.join(PAYLOAD_DIR, "setup.ps1"), "utf8");
-    const setupScript = setupTemplate.replace("__BASE_URL__", baseUrl);
+    const setupScript = setupTemplate.replace("__BASE_URL__", baseUrl).replace("__NO_BANNER__", noBanner ? "$true" : "$false");
 
     // Build payload.zip fresh (server binary + scripts + nssm)
     const zipPath = path.join(os.tmpdir(), "dinghy-payload.zip");
@@ -561,6 +731,19 @@ async function cmdServeSetup(cfg, json = false) {
             console.log(`  [${new Date().toLocaleTimeString()}] guest fetched payload.zip (${(zipBuf.length / 1e6).toFixed(1)} MB)`);
             res.writeHead(200, { "Content-Type": "application/zip", "Content-Length": zipBuf.length });
             res.end(zipBuf);
+        } else if (req.url === "/banner" && req.method === "POST") {
+            let body = "";
+            req.on("data", c => { body += c; if (body.length > 65536) req.destroy(); });
+            req.on("end", () => {
+                try {
+                    const b = JSON.parse(body);
+                    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+                    fs.writeFileSync(BANNER_PATH, JSON.stringify({ caption: String(b.caption ?? ""), text: String(b.text ?? "") }, null, 2) + "\n");
+                    console.log(`  [${new Date().toLocaleTimeString()}] guest reported its logon banner`);
+                    res.writeHead(204);
+                } catch { res.writeHead(400); }
+                res.end();
+            });
         } else {
             res.writeHead(404);
             res.end("not found");
@@ -582,7 +765,7 @@ async function cmdServeSetup(cfg, json = false) {
     // Re-run case: guest already online means the user is refreshing guest
     // config, not installing — keep serving until stopped (Ctrl-C, or the
     // menu-bar app's Stop button).
-    if (await guestAlive(cfg, 2500)) {
+    if (await findGuest(cfg, 2500)) {
         if (!json) console.log(`Guest is already online — serving the (updated) setup script until Ctrl-C.`);
         await new Promise(() => {});
     }
@@ -590,7 +773,7 @@ async function cmdServeSetup(cfg, json = false) {
     if (!json) console.log(`Waiting for the guest server to come up on ${cfg.host}:${cfg.apiPort} (Ctrl-C to stop) ...`);
     while (true) {
         await new Promise(r => setTimeout(r, 3000));
-        if (await guestAlive(cfg, 2500)) break;
+        if (await findGuest(cfg, 2500)) break;
     }
     if (!json) console.log(`Guest server is UP. Running first sync ...`);
     server.close();
@@ -600,6 +783,13 @@ async function cmdServeSetup(cfg, json = false) {
 // Delegates to the repo-root `update` launcher (installed from the tracked
 // host/dinghy-update.sh on first run) rather than reimplementing the git
 // logic here — see host/dinghy-update.sh for why it's a separate script.
+function cmdLogin(cfg) {
+    if (!cfg.username) throw new Error("Set your Windows login first: dinghy config username <domain\\user>");
+    const pw = promptPassword(winUser(cfg));
+    if (!pw) { console.log("Cancelled."); return; }
+    console.log(keychainSet(winUser(cfg), pw) ? `Saved the password for ${winUser(cfg)} in your Keychain.` : "Could not save to the Keychain.");
+}
+
 function cmdUpdate() {
     const launcher = path.join(PROJECT_ROOT, "update");
     const tracked = path.join(PROJECT_ROOT, "host", "dinghy-update.sh");
@@ -635,7 +825,7 @@ const cfg = loadConfig();
 
 try {
     switch (cmd) {
-        case "serve-setup": await cmdServeSetup(cfg, rest.includes("--json")); break;
+        case "serve-setup": await cmdServeSetup(cfg, rest.includes("--json"), rest.includes("--no-banner")); break;
         case "status":      await cmdStatus(cfg); break;
         case "sync":        await cmdSync(cfg); break;
         case "launch":      await cmdLaunch(cfg, rest.join(" ")); break;
@@ -644,6 +834,7 @@ try {
         case "doctor":      await cmdDoctor(cfg); break;
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
         case "update":      cmdUpdate(); break;
+        case "login":       cmdLogin(cfg); break;
         case "version":
         case "--version":
         case "-v":          console.log(`dinghy ${VERSION}`); break;

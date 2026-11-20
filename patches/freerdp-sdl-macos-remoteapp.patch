@@ -1,0 +1,159 @@
+diff --git a/client/SDL/SDL3/sdl_context.cpp b/client/SDL/SDL3/sdl_context.cpp
+index bcb37bf..9259dfb 100644
+--- a/client/SDL/SDL3/sdl_context.cpp
++++ b/client/SDL/SDL3/sdl_context.cpp
+@@ -388,8 +388,11 @@ BOOL SdlContext::postConnect(freerdp* instance)
+ 
+ 	if (!sdl->setResizeable(false))
+ 		return FALSE;
+-	if (!sdl->setFullscreen(freerdp_settings_get_bool(context->settings, FreeRDP_Fullscreen) ||
+-	                            freerdp_settings_get_bool(context->settings, FreeRDP_UseMultimon),
++	/* RemoteApp keeps its per-display desktop windows hidden; making them fullscreen on macOS
++	 * creates native fullscreen Spaces (black backdrop under every RemoteApp window). */
++	const bool remoteApp = freerdp_settings_get_bool(context->settings, FreeRDP_RemoteApplicationMode);
++	if (!sdl->setFullscreen(!remoteApp && (freerdp_settings_get_bool(context->settings, FreeRDP_Fullscreen) ||
++	                            freerdp_settings_get_bool(context->settings, FreeRDP_UseMultimon)),
+ 	                        true))
+ 		return FALSE;
+ 	sdl->setConnected(true);
+diff --git a/client/SDL/SDL3/sdl_rail.cpp b/client/SDL/SDL3/sdl_rail.cpp
+index 2fa1bd2..dd348dc 100644
+--- a/client/SDL/SDL3/sdl_rail.cpp
++++ b/client/SDL/SDL3/sdl_rail.cpp
+@@ -16,6 +16,12 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++#include <atomic>
++#include <chrono>
++#include <csignal>
++#include <thread>
++#include <freerdp/scancode.h>
++#include <freerdp/input.h>
+ #include <algorithm>
+ #include <tuple>
+ #include <utility>
+@@ -507,6 +513,35 @@ void SdlRail::enableRemoteAppMode(bool enable)
+ 	queueScreenSaverUpdate();
+ }
+ 
++/* WinDinghy: the server shows a logon notice (legal banner etc.) that needs the user. Announce it
++ * on the log so the launcher can show its own dialog; when the launcher accepts it signals
++ * SIGUSR1 and we dismiss the Windows dialog once with Enter. */
++static std::atomic<bool> g_noticeAccepted{ false };
++static std::atomic<bool> g_noticeWatching{ false };
++
++static void windinghyAcceptSignal(int)
++{
++	g_noticeAccepted = true;
++}
++
++void SdlRail::announceLogonNotice()
++{
++	WLog_WARN(TAG, "WINDINGHY-LOGON-NOTICE");
++	if (g_noticeWatching.exchange(true))
++		return;
++	std::signal(SIGUSR1, windinghyAcceptSignal);
++	rdpInput* input = _context->context()->input;
++	std::thread([input]() {
++		for (int i = 0; i < 1200 && !g_noticeAccepted; i++)
++			std::this_thread::sleep_for(std::chrono::milliseconds(100));
++		if (!g_noticeAccepted)
++			return;
++		std::this_thread::sleep_for(std::chrono::milliseconds(300));
++		(void)freerdp_input_send_keyboard_event_ex(input, TRUE, FALSE, RDP_SCANCODE_RETURN);
++		(void)freerdp_input_send_keyboard_event_ex(input, FALSE, FALSE, RDP_SCANCODE_RETURN);
++	}).detach();
++}
++
+ /* Show the desktop anyway after this: not every logon prompt is announced. */
+ static constexpr Uint32 kDesktopHoldMs = 10000;
+ 
+@@ -529,6 +564,7 @@ bool SdlRail::desktopMayShow()
+ 	WLog_DBG(TAG, "RemoteApp not started after %" PRIu32 " ms, showing the desktop",
+ 	         kDesktopHoldMs);
+ 	_desktopReleased = true;
++	announceLogonNotice();
+ 	return true;
+ }
+ 
+@@ -537,6 +573,7 @@ void SdlRail::noteLogonPrompt()
+ 	if (_desktopReleased.exchange(true))
+ 		return;
+ 	WLog_DBG(TAG, "logon dialog on the server, showing the desktop");
++	announceLogonNotice();
+ 	if (!sdl_push_user_event(SDL_EVENT_USER_UPDATE))
+ 		WLog_WARN(TAG, "sdl_push_user_event failed");
+ }
+diff --git a/client/SDL/SDL3/sdl_rail.hpp b/client/SDL/SDL3/sdl_rail.hpp
+index 59d07cb..67c6996 100644
+--- a/client/SDL/SDL3/sdl_rail.hpp
++++ b/client/SDL/SDL3/sdl_rail.hpp
+@@ -66,6 +66,7 @@ class SdlRail
+ 	[[nodiscard]] bool desktopMayShow();
+ 	/* Any thread: the server shows a logon dialog that needs the user (LogonErrorInfo). */
+ 	void noteLogonPrompt();
++	void announceLogonNotice();
+ 
+ 	/* Paint all RAIL windows (window-mapped GFX surface, or legacy desktop region).
+ 	 * `damage` = server-updated desktop rects for this cycle (empty = nothing new). */
+diff --git a/client/SDL/SDL3/sdl_window.cpp b/client/SDL/SDL3/sdl_window.cpp
+index 34e8c65..38f71dd 100644
+--- a/client/SDL/SDL3/sdl_window.cpp
++++ b/client/SDL/SDL3/sdl_window.cpp
+@@ -18,6 +18,7 @@
+  * limitations under the License.
+  */
+ #include <limits>
++#include <cstring>
+ #include <sstream>
+ #include <cmath>
+ 
+@@ -478,6 +479,13 @@ rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPr
+ 	                   forceAsPrimary);
+ }
+ 
++/* macOS (cocoa): a fullscreen probe window creates a real fullscreen Space. */
++static bool isCocoaDriver()
++{
++	const char* drv = SDL_GetCurrentVideoDriver();
++	return drv && (strcmp(drv, "cocoa") == 0);
++}
++
+ /* Dummy windows report wrong sizes on Wayland and X11, use the display. */
+ static rdpMonitor queryDisplay(SDL_DisplayID id, bool forceAsPrimary)
+ {
+@@ -948,7 +956,7 @@ static SDL_Window* createDummy(SDL_DisplayID id)
+ 
+ rdpMonitor SdlWindow::query(SDL_DisplayID id, bool forceAsPrimary)
+ {
+-	if (sdl::utils::isWaylandDriver() || sdl::utils::isX11Driver())
++	if (sdl::utils::isWaylandDriver() || sdl::utils::isX11Driver() || isCocoaDriver())
+ 		return queryDisplay(id, forceAsPrimary);
+ 
+ 	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), SDL_DestroyWindow);
+@@ -970,6 +978,24 @@ rdpMonitor SdlWindow::query(SDL_DisplayID id, bool forceAsPrimary)
+ 
+ SDL_Rect SdlWindow::rect(SDL_DisplayID id, bool forceAsPrimary)
+ {
++	if (isCocoaDriver())
++	{
++		/* macOS: the probe window below goes fullscreen, which creates a native fullscreen Space
++		 * (black backdrop that RemoteApp windows then land on). Ask the display instead. */
++		SDL_Rect r = {};
++		const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(id);
++		if (!mode || !SDL_GetDisplayBounds(id, &r))
++			return {};
++		if (forceAsPrimary)
++		{
++			r.x = 0;
++			r.y = 0;
++		}
++		r.w = static_cast<int>(std::roundf(static_cast<float>(r.w) * mode->pixel_density));
++		r.h = static_cast<int>(std::roundf(static_cast<float>(r.h) * mode->pixel_density));
++		return r;
++	}
++
+ 	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), SDL_DestroyWindow);
+ 	if (!window)
+ 		return {};

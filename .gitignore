@@ -6,3 +6,6 @@ host/menubar/windinghy-menubar
 # first run and re-synced on every update. Gitignored so git operations the
 # updater performs (pull/reset/checkout) can never delete or corrupt it.
 /update
+
+# Patched FreeRDP build (scripts/build-freerdp.sh)
+/vendor/

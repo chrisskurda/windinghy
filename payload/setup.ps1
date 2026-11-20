@@ -8,6 +8,7 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $BaseUrl = "__BASE_URL__"
+$NoLogonBanner = __NO_BANNER__   # opt-in: dinghy serve-setup --no-banner
 $WB = "C:\Program Files\WinBoat"
 
 function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -108,8 +109,16 @@ Step "Pinning RDP to TCP-only transport"
 New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Force | Out-Null
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name SelectTransport -Value 1 -Type DWord
 $ErrorActionPreference = "Continue"
-Restart-Service TermService -Force -ErrorAction SilentlyContinue
-Ok "RDP transport pinned to TCP (TermService restarted)"
+if ($env:SESSIONNAME -like "RDP*") {
+    # Running over RDP: restarting TermService now would drop this very session mid-script.
+    # Restart it from a one-shot SYSTEM task a minute after we finish instead.
+    $when = (Get-Date).AddMinutes(2).ToString("HH:mm")
+    cmd /c "schtasks /create /f /tn WinDinghyRestartRDP /sc once /st $when /ru SYSTEM /tr `"powershell -NoProfile -Command Restart-Service TermService -Force; schtasks /delete /f /tn WinDinghyRestartRDP`" >nul 2>&1"
+    Ok "RDP transport pinned to TCP (TermService restart scheduled for $when; your RDP session will reconnect)"
+} else {
+    Restart-Service TermService -Force -ErrorAction SilentlyContinue
+    Ok "RDP transport pinned to TCP (TermService restarted)"
+}
 
 Step "Disabling Edge background mode (breaks RemoteApp relaunch)"
 # Edge's startup-boost/background processes make a second RemoteApp launch
@@ -135,6 +144,35 @@ cmd /c 'w32tm /resync /force >nul 2>&1'
 # Belt-and-braces resync task in case w32time stalls
 cmd /c 'schtasks /create /f /tn "WinBoatTimeSync" /sc minute /mo 5 /ru SYSTEM /tr "w32tm /resync" >nul 2>&1'
 Ok "Time sync: NTP poll every 60s + resync task every 5 minutes"
+$ErrorActionPreference = "Stop"
+
+# --- 4b. Logon banner (legal notice) ---
+# Report the banner text to the Mac so WinDinghy can show it as a native dialog
+# before connecting. With -NoLogonBanner (dinghy serve-setup --no-banner) it is
+# also blanked locally and re-blanked every 15 minutes in case Group Policy
+# restores it. Off by default: the banner may be an organization's policy.
+Step "Logon banner"
+$ErrorActionPreference = "Continue"
+$sysPol = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+$bCap = (Get-ItemProperty $sysPol -Name legalnoticecaption -ErrorAction SilentlyContinue).legalnoticecaption
+$bTxt = (Get-ItemProperty $sysPol -Name legalnoticetext -ErrorAction SilentlyContinue).legalnoticetext
+if ($bTxt -or $bCap) {
+    try {
+        $body = @{ caption = "$bCap"; text = "$bTxt" } | ConvertTo-Json
+        Invoke-RestMethod -Uri "$BaseUrl/banner" -Method Post -Body $body -ContentType "application/json" -UseBasicParsing | Out-Null
+        Ok "Logon banner reported to the Mac"
+    } catch { Warn "Could not report the logon banner (non-fatal)" }
+    if ($NoLogonBanner) {
+        $blank = 'Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name legalnoticecaption -Value ""; Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name legalnoticetext -Value ""'
+        Invoke-Expression $blank
+        $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($blank))
+        cmd /c "schtasks /create /f /tn WinDinghyNoBanner /sc minute /mo 15 /ru SYSTEM /tr `"powershell -NoProfile -EncodedCommand $enc`" >nul 2>&1"
+        Ok "Logon banner suppressed (task WinDinghyNoBanner re-applies it every 15 min)"
+    }
+} else {
+    Ok "No logon banner configured"
+    cmd /c 'schtasks /delete /f /tn WinDinghyNoBanner >nul 2>&1'
+}
 $ErrorActionPreference = "Stop"
 
 # --- 5. Health check ---
