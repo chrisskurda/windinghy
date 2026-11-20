@@ -33,6 +33,13 @@ bumps may include breaking changes).
   Windows logon banner suppressed. The guest warns that this may violate your
   network policy and requires typing YES.
 
+- Native error screens: connection problems (bad password, VM unreachable or
+  lost, security/clock errors, same-user console session, timeouts) show a
+  native alert with a plain explanation and a "Show Log" button instead of
+  FreeRDP's unscaled dialog; normal closes stay silent.
+- `dinghy` can be symlinked into a PATH directory (`ln -s ~/windinghy/dinghy
+  ~/.local/bin/dinghy`); the wrapper resolves symlinks.
+
 ### Fixed
 
 - The native client exits about 3 seconds after an app's last window closes

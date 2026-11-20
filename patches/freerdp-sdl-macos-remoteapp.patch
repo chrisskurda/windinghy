@@ -1,5 +1,5 @@
 diff --git a/client/SDL/SDL3/sdl_context.cpp b/client/SDL/SDL3/sdl_context.cpp
-index bcb37bf..718b5c7 100644
+index bcb37bf..53e05ab 100644
 --- a/client/SDL/SDL3/sdl_context.cpp
 +++ b/client/SDL/SDL3/sdl_context.cpp
 @@ -135,7 +135,12 @@ void SdlContext::setMetadata()
@@ -30,6 +30,20 @@ index bcb37bf..718b5c7 100644
  	                        true))
  		return FALSE;
  	sdl->setConnected(true);
+@@ -754,6 +762,13 @@ void SdlContext::sdl_client_cleanup(int exit_code, const std::string& error_msg)
+ 				break;
+ 			default:
+ 			{
++				/* WinDinghy: the launcher shows its own native error; just log it. */
++				const char* quiet = getenv("WINDINGHY_NO_ERROR_DIALOGS");
++				if (quiet && quiet[0] == '1')
++				{
++					WLog_Print(getWLog(), WLOG_ERROR, "WINDINGHY-ERROR: %s", error_msg.c_str());
++					break;
++				}
+ 				showError = true;
+ 				getDialog().showError(error_msg);
+ 			}
 diff --git a/client/SDL/SDL3/sdl_rail.cpp b/client/SDL/SDL3/sdl_rail.cpp
 index 2fa1bd2..6b251ba 100644
 --- a/client/SDL/SDL3/sdl_rail.cpp

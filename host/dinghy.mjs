@@ -570,7 +570,7 @@ function bundleClient(bin, bundleDir) {
         const target = path.resolve(path.dirname(bin), "..", "lib");
         let cur = null;
         try { cur = fs.readlinkSync(lib); } catch {}
-        if (cur !== target) { fs.rmSync(lib, { force: true, recursive: true }); fs.symlinkSync(target, lib); }
+        if (cur !== target) { try { fs.unlinkSync(lib); } catch {} fs.symlinkSync(target, lib); }
         return dest;
     } catch { return bin; }
 }
@@ -585,7 +585,7 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
     const logFile = path.join(LOG_DIR, `${safeName(meta.Name ?? "desktop")}.log`);
     const fd = fs.openSync(logFile, "w");
     // Credentials go in over stdin (/args-from) so they never appear in `ps`.
-    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd], env: { ...process.env, WINDINGHY_APP_NAME: meta.Name ?? "Windows Desktop" } });
+    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd], env: { ...process.env, WINDINGHY_APP_NAME: meta.Name ?? "Windows Desktop", WINDINGHY_NO_ERROR_DIALOGS: "1" } });
     child.stdin.end(nativeArgs(cfg, meta, pw).join("\n") + "\n");
     child.unref();
     bumpUsage(meta.Name ?? "Windows Desktop");
@@ -607,23 +607,40 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
             // No stored banner text: leave the Windows dialog for the user to click.
         }
     }
-    const early = exited;
-    if (early === null) return; // still running: connected
+    // Connected: stay alive until the client exits, then explain any failure.
+    while (exited === null) await new Promise(r => setTimeout(r, 1000));
     const log = logTail(logFile);
     if (/LOGON_FAILURE|ACCESS_DENIED|0x00020014/.test(log) && !retried) {
         keychainDelete(winUser(cfg));
         return launchNative(cfg, meta, bundleDir, true);
     }
-    if (/DISCONNECT_BY_USER|LAST-WINDOW-CLOSED/.test(log) && !/ERRINFO_LOGOFF_BY_USER\b/.test(log)) {
-        return; // the user closed the app: a normal end, not an error
-    }
-    if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(log)) {
-        notify(`Windows ended the session. If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.`);
-    } else if (/0x1807|SECURITY/.test(log)) {
-        notify("Connection failed with a security error. Check the VM clock (dinghy doctor).");
-    } else if (early !== 0) {
-        notify(`Connection failed (see ${logFile})`);
-    }
+    const problem = diagnoseExit(cfg, exited, log);
+    if (problem) showError(problem.title, problem.message, logFile);
+}
+
+// Map a client exit to a user-facing problem, or null for a normal end.
+function diagnoseExit(cfg, code, log) {
+    if (/LAST-WINDOW-CLOSED/.test(log)) return null;
+    if (/ERRINFO_RPC_INITIATED_DISCONNECT_BY_USER|ERRINFO_DISCONNECT_BY_USER/.test(log)) return null;
+    if (code === 0 || code === null || code === -1) return null; // clean exit or killed by a signal
+    if (/LOGON_FAILURE|ACCESS_DENIED|0x00020014/.test(log))
+        return { title: "Windows rejected the login", message: `Windows rejected the password for ${winUser(cfg)}. Run "dinghy login" to save the right one.` };
+    if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(log))
+        return { title: "Windows ended the session", message: `If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.` };
+    if (/0x1807|CREDSSP|SECURITY/i.test(log))
+        return { title: "Security error", message: "Windows refused the secure connection, usually because the VM clock drifted. Run \"dinghy doctor\", or restart the VM." };
+    if (/TRANSPORT_FAILED|Broken pipe|CONNECT_FAILED|0x0002000[0-9a-f]|timed out|refused/i.test(log))
+        return { title: "Lost the Windows VM", message: `Couldn't reach (or lost) the VM at ${cfg.host}. Is it running? Start it in UTM and try again.` };
+    if (/IDLE_TIMEOUT|LOGON_TIMEOUT/.test(log))
+        return { title: "Session timed out", message: "Windows ended the session because it was idle or the logon took too long." };
+    const last = log.split("\n").filter(l => /WINDINGHY-ERROR|\[ERROR\]/.test(l)).pop() ?? "";
+    return { title: "Connection failed", message: last.replace(/^\[[^\]]*\] \[[^\]]*\] /, "").slice(0, 400) || `The Windows connection ended unexpectedly (exit ${code}).` };
+}
+
+// Native error screen (AppleScript dialog with a caution icon).
+function showError(title, message, logFile) {
+    const out = asDialog(`button returned of (display dialog "${asq(message)}" with title "WinDinghy: ${asq(title)}" with icon caution buttons {"Show Log", "OK"} default button "OK")`);
+    if (out === "Show Log" && logFile) spawnSync("open", ["-t", logFile]);
 }
 
 async function cmdOpenRdp(cfg, bundleDir) {
