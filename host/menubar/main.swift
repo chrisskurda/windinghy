@@ -78,6 +78,126 @@ func tcpOpen(host: String, port: Int, timeoutSec: Int32 = 3) -> Bool {
 
 // ---------- app delegate ----------
 
+// A small window that runs a dinghy command and streams its output (setup, fix).
+final class RunWindow: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    let textView = NSTextView()
+    let spinner = NSProgressIndicator()
+    let statusLabel = NSTextField(labelWithString: "Working…")
+    let copyButton = NSButton(title: "Copy Command", target: nil, action: nil)
+    let closeButton = NSButton(title: "Cancel", target: nil, action: nil)
+    var process: Process?
+    var command = ""
+    var finished = false
+    var onFinish: ((Int32) -> Void)?
+    var onClose: (() -> Void)?
+
+    init(title: String) {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 380),
+                          styleMask: [.titled, .closable, .miniaturizable],
+                          backing: .buffered, defer: false)
+        super.init()
+        window.title = title
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = content
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 56, width: 568, height: 308))
+        scroll.hasVerticalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        textView.isEditable = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.autoresizingMask = [.width]
+        scroll.documentView = textView
+        content.addSubview(scroll)
+
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.frame = NSRect(x: 16, y: 20, width: 16, height: 16)
+        spinner.startAnimation(nil)
+        content.addSubview(spinner)
+        statusLabel.frame = NSRect(x: 38, y: 18, width: 300, height: 20)
+        content.addSubview(statusLabel)
+
+        copyButton.frame = NSRect(x: 340, y: 14, width: 130, height: 28)
+        copyButton.target = self; copyButton.action = #selector(copyCommand)
+        copyButton.isHidden = true
+        content.addSubview(copyButton)
+        closeButton.frame = NSRect(x: 484, y: 14, width: 100, height: 28)
+        closeButton.target = self; closeButton.action = #selector(closePressed)
+        closeButton.keyEquivalent = "\u{1b}"
+        content.addSubview(closeButton)
+    }
+
+    func show() {
+        window.center()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func append(_ text: String) {
+        let atEnd = true
+        textView.textStorage?.append(NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+            .foregroundColor: NSColor.textColor]))
+        if atEnd { textView.scrollToEndOfDocument(nil) }
+        // The manual fallback prints a one-liner for the user to paste into Windows.
+        for line in text.split(separator: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("irm http") { command = t; copyButton.isHidden = false }
+        }
+    }
+
+    func run(node: String, dinghy: String, args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [dinghy] + args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.append(s) }
+        }
+        p.terminationHandler = { [weak self] proc in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async { self?.finish(proc.terminationStatus) }
+        }
+        do { try p.run(); process = p } catch {
+            append("Couldn't run dinghy: \(error.localizedDescription)\n")
+            finish(1)
+        }
+    }
+
+    func finish(_ status: Int32) {
+        finished = true
+        spinner.stopAnimation(nil)
+        spinner.isHidden = true
+        statusLabel.stringValue = status == 0 ? "Finished." : "Stopped (see the log above)."
+        closeButton.title = "Close"
+        onFinish?(status)
+    }
+
+    @objc func copyCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        statusLabel.stringValue = "Command copied: paste it into an elevated PowerShell in Windows."
+    }
+
+    @objc func closePressed() { window.close() }
+
+    func windowWillClose(_ notification: Notification) {
+        if !finished { process?.terminate() }
+        onClose?()
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFieldDelegate {
     var statusItem: NSStatusItem!
     let menu = NSMenu()
@@ -86,11 +206,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var metricsLine = ""
     var syncing = false
     var updating = false
-    var setupProcess: Process?
-    var setupCommand = ""
-    var setupURL = ""
-    var setupStderr = ""
-    var setupStopped = false
+    var runWindow: RunWindow?
     var searchQuery = ""
     var searchField: NSSearchField?
     var searchItem: NSMenuItem?
@@ -157,7 +273,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // The VM's DHCP address can change: ask dinghy to find it again (by MAC, then a
     // subnet scan). It rewrites config.json; the next poll picks the new host up.
     func rediscoverGuest() {
-        guard !discovering, !syncing, !updating, setupProcess == nil,
+        guard !discovering, !syncing, !updating, runWindow == nil,
               Date().timeIntervalSince(lastDiscover) > 60,
               let node = findNode(), let dinghy = findDinghy() else { return }
         discovering = true
@@ -313,8 +429,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             menu.addItem(makeItem("Restart Windows VM", #selector(restartVM), ""))
         } else {
             menu.addItem(makeItem("Start Windows VM", #selector(startVM), "b"))
-            // First run / unreachable guest: offer the install-script flow here
+            // First run / unreachable guest: hands-free setup and repair
             menu.addItem(setupMenuItem())
+            menu.addItem(makeItem("Fix Problems…", #selector(showFix), ""))
         }
         menu.addItem(.separator())
 
@@ -324,7 +441,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         promptItem.state = cfg.promptcreds != "off" ? .on : .off
         menu.addItem(promptItem)
         menu.addItem(makeItem("Setup Check…", #selector(setupCheck), ""))
-        if online { menu.addItem(setupMenuItem()) }
+        if online {
+            menu.addItem(setupMenuItem())
+            menu.addItem(makeItem("Fix Problems…", #selector(showFix), ""))
+        }
         menu.addItem(makeItem(updating ? "Checking for Updates…" : "Check for Updates…", #selector(checkForUpdates), "", enabled: !updating))
         let login = makeItem("Start at Login", #selector(toggleLogin), "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -653,113 +773,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // ---------- guest setup (serve install script) ----------
 
     func setupMenuItem() -> NSMenuItem {
-        makeItem(setupProcess == nil ? "Set Up Windows VM…" : "Windows Setup Command…", #selector(showSetup), "")
+        makeItem("Set Up Windows VM…", #selector(showSetup), "")
     }
 
-    // Runs `dinghy serve-setup --json`, which serves the guest payload on the
-    // vmnet interface and prints one JSON line with the PowerShell one-liner
-    // (correct Mac IP baked in). The process keeps serving; it exits 0 on its
-    // own after the guest comes up and the first sync finishes.
+    // Runs `dinghy setup` (hands-free through the UTM guest agent; it falls back to a
+    // paste-in-Windows one-liner when the agent isn't installed) in a progress window.
     @objc func showSetup() {
-        if setupProcess != nil {
-            if setupCommand.isEmpty { notify("Setup server is still starting…") } else { showSetupAlert() }
-            return
-        }
-        guard let node = findNode(), let dinghy = findDinghy() else {
-            notify("Can't find node or dinghy.mjs — run ./dinghy serve-setup from a terminal instead.")
-            return
-        }
-        setupCommand = ""; setupURL = ""; setupStderr = ""; setupStopped = false
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: node)
-        p.arguments = [dinghy, "serve-setup", "--json"]
-        let out = Pipe(), err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        var buffer = Data()
-        var announced = false
-        out.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let chunk = h.availableData
-            guard !chunk.isEmpty, !announced else { return }
-            buffer.append(chunk)
-            guard let text = String(data: buffer, encoding: .utf8), text.contains("\n"),
-                  let line = text.split(separator: "\n").first,
-                  let data = line.data(using: .utf8),
-                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let cmd = json["oneliner"] as? String else { return }
-            announced = true
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.setupCommand = cmd
-                self.setupURL = json["url"] as? String ?? ""
-                self.showSetupAlert()
-            }
-        }
-        err.fileHandleForReading.readabilityHandler = { [weak self] h in
-            guard let s = String(data: h.availableData, encoding: .utf8), !s.isEmpty else { return }
-            DispatchQueue.main.async { self?.setupStderr += s }
-        }
-        p.terminationHandler = { [weak self] proc in
-            out.fileHandleForReading.readabilityHandler = nil
-            err.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.setupProcess = nil
-                if self.setupStopped { return }
-                if proc.terminationStatus == 0 {
-                    self.notify("Windows setup complete — apps synced.")
-                    self.poll()
-                } else {
-                    let msg = self.setupStderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.notify(msg.isEmpty ? "Setup server stopped unexpectedly." : msg)
-                }
-            }
-        }
-        do { try p.run() } catch {
-            notify("Couldn't start the setup server: \(error.localizedDescription)")
-            return
-        }
-        setupProcess = p
+        runDinghyWindow(title: "Set Up Windows VM", args: ["setup"])
     }
 
-    func showSetupAlert() {
-        let alert = NSAlert()
-        alert.messageText = "Set Up the Windows VM"
-        alert.informativeText = """
-            WinDinghy is serving the installer at \(setupURL).
+    @objc func showFix() {
+        runDinghyWindow(title: "Fix Problems", args: ["fix"])
+    }
 
-            In the Windows VM, open PowerShell as Administrator and run the \
-            command below. It enables RDP/RemoteApp and installs the guest \
-            agent (needs Windows Pro/Enterprise/Education). Safe to re-run.
-
-            Leave WinDinghy running — when the guest comes online, apps sync \
-            automatically.
-            """
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
-        field.stringValue = setupCommand
-        field.isEditable = false
-        field.isSelectable = true
-        field.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Copy Command")
-        alert.addButton(withTitle: "Close")
-        alert.addButton(withTitle: "Stop Setup Server")
-        NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(setupCommand, forType: .string)
-        case .alertThirdButtonReturn:
-            setupStopped = true
-            setupProcess?.terminate()
-            setupProcess = nil
-        default:
-            break
+    func runDinghyWindow(title: String, args: [String]) {
+        if let w = runWindow, !w.finished { w.show(); return }
+        guard let node = findNode(), let dinghy = findDinghy() else {
+            notify("Can't find node or dinghy.mjs — run `dinghy \(args.joined(separator: " "))` from a terminal instead.")
+            return
         }
+        let w = RunWindow(title: title)
+        w.onFinish = { [weak self] status in
+            if status == 0 { self?.poll() }
+        }
+        w.onClose = { [weak self] in self?.runWindow = nil }
+        runWindow = w
+        w.show()
+        w.run(node: node, dinghy: dinghy, args: args)
     }
 
     func applicationWillTerminate(_ n: Notification) {
-        setupProcess?.terminate()
+        runWindow?.process?.terminate()
     }
 
     // ---------- setup check ----------

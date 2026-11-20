@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 
-APP="$HOME/Applications/WinDinghy.app"
+APP="${APP:-$HOME/Applications/WinDinghy.app}"
 REPO_ROOT="$(cd ../.. && pwd)"
 VERSION="$(sed -n 's/^const VERSION = "\([^"]*\)".*/\1/p' ../dinghy.mjs)"
 
@@ -16,6 +16,23 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv windinghy-menubar "$APP/Contents/MacOS/"
 # Bundle a copy of dinghy.mjs so Sync works even if the repo moves
 cp "$REPO_ROOT/host/dinghy.mjs" "$REPO_ROOT/host/guest.mjs" "$APP/Contents/Resources/"
+# Guest payload (setup.ps1, guest server) so `dinghy setup` works from the app alone
+ditto "$REPO_ROOT/payload" "$APP/Contents/Resources/payload"
+
+# Native RDP client (patched FreeRDP): build the self-contained "lean" client once if it
+# isn't there, then bundle it. Set SKIP_FREERDP=1 to skip (the app falls back to Windows App).
+FREERDP="${FREERDP:-$REPO_ROOT/vendor/freerdp}"
+if [ ! -x "$FREERDP/bin/sdl-freerdp" ] && [ "${SKIP_FREERDP:-0}" != "1" ]; then
+    echo "Building the native RDP client (one time, a few minutes)..."
+    "$REPO_ROOT/scripts/build-freerdp.sh" || echo "Native client build failed; continuing without it."
+fi
+if [ -x "$FREERDP/bin/sdl-freerdp" ]; then
+    echo "Bundling the native RDP client"
+    mkdir -p "$APP/Contents/Resources/freerdp"
+    ditto "$FREERDP/bin" "$APP/Contents/Resources/freerdp/bin"
+    mkdir -p "$APP/Contents/Resources/freerdp/lib"
+    for f in "$FREERDP"/lib/*.dylib; do ditto "$f" "$APP/Contents/Resources/freerdp/lib/$(basename "$f")"; done
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

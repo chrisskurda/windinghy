@@ -2,9 +2,9 @@
 
 ## Next (tuning the native client)
 - Per-app Dock icons/names (bundle-local client copy; verify on macOS).
-- Show connection errors as native notifications instead of FreeRDP's unscaled dialogs.
+- Show connection errors as native notifications instead of FreeRDP's unscaled dialogs (done).
 - `dinghy status` warns about a same-user console session on the VM.
-- Bundle the built client in the menu-bar app; no build script for end users.
+- Bundle the built client in the menu-bar app (done: lean client, no Homebrew at runtime). Still to do: ship a prebuilt/notarized app so end users skip the first-time build.
 - Edge/popup focus issue: collect `nativeDebug` logs if it recurs.
 - Logon banner suppression stays opt-in (`dinghy config suppressBanner on` or
   `serve-setup --no-banner`; guest requires typing YES and warns about policy).

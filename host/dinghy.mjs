@@ -32,7 +32,8 @@ const VERSION = "0.1.0";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-const PAYLOAD_DIR = path.join(PROJECT_ROOT, "payload");
+// Inside the menu-bar app the payload and the native client sit next to dinghy.mjs.
+const PAYLOAD_DIR = fs.existsSync(path.join(__dirname, "payload")) ? path.join(__dirname, "payload") : path.join(PROJECT_ROOT, "payload");
 const CONFIG_DIR = path.join(os.homedir(), ".config", "windinghy");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const SETUP_PORT = Number(process.env.DINGHY_SETUP_PORT) || 8756;
@@ -556,7 +557,11 @@ const KEYCHAIN_SERVICE = "windinghy";
 const LOG_DIR = path.join(CONFIG_DIR, "logs");
 
 function nativeBin(cfg) {
-    const candidates = [cfg.nativeBin, path.join(PROJECT_ROOT, "vendor", "freerdp", "bin", "sdl-freerdp")].filter(Boolean);
+    const candidates = [
+        cfg.nativeBin,
+        path.join(__dirname, "freerdp", "bin", "sdl-freerdp"),                 // bundled in the app
+        path.join(PROJECT_ROOT, "vendor", "freerdp", "bin", "sdl-freerdp"),    // built from a checkout
+    ].filter(Boolean);
     return candidates.find(c => fs.existsSync(c)) ?? null;
 }
 

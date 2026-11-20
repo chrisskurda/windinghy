@@ -57,6 +57,15 @@ bumps may include breaking changes).
   exec` is asynchronous, so output is collected through a unique result file that
   the script renames when finished, polled with `file pull`.
 
+- Menu bar: "Set Up Windows VM…" now runs `dinghy setup` in a live progress
+  window (with a Copy Command button for the manual fallback), and a new
+  "Fix Problems…" item runs `dinghy fix`.
+- The native RDP client is bundled in the app: `host/menubar/build.sh` builds a
+  self-contained "lean" client (no ffmpeg/H.264; `scripts/build-freerdp.sh`,
+  `scripts/relocate-dylibs.py` copies the remaining libraries and rewrites install
+  names so Homebrew isn't needed to run it) and ships it, plus the guest payload,
+  inside WinDinghy.app. `dinghy` prefers the bundled client automatically.
+
 ### Fixed
 
 - The native client exits about 3 seconds after an app's last window closes
