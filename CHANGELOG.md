@@ -46,6 +46,15 @@ bumps may include breaking changes).
   The MAC and the UTM VM name are learned automatically. `status`, `sync`,
   `doctor` and the menu-bar app (when the guest stops answering) now run it.
 
+- `dinghy setup`: hands-free guest setup through UTM's guest agent (starts the
+  VM, installs the guest components, creates a dedicated "WinDinghy" Windows
+  account with a random password stored in the Keychain, syncs your apps).
+  Falls back to the manual one-liner if the agent isn't installed yet.
+- `dinghy fix [session|rdp|clock|server]` repairs common guest problems the
+  same way (clock drift, RDP, the guest server, a blocking console session
+  after a confirmation). `doctor` now points at these.
+- `host/guest.mjs`: guest transport over `utmctl exec/file/ip-address`.
+
 ### Fixed
 
 - The native client exits about 3 seconds after an app's last window closes

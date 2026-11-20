@@ -167,7 +167,7 @@ if ($bTxt -or $bCap) {
         Write-Host "    WARNING: you asked to SUPPRESS the Windows logon banner." -ForegroundColor Red
         Write-Host "    That banner may be your organization's acceptable-use / network policy notice." -ForegroundColor Red
         Write-Host "    Hiding it may violate that policy. You are responsible for deciding this is OK." -ForegroundColor Red
-        $confirm = Read-Host "    Type YES to suppress it (anything else keeps the banner)"
+        $confirm = if ($env:WINDINGHY_YES -eq "YES") { "YES" } else { Read-Host "    Type YES to suppress it (anything else keeps the banner)" }
         if ($confirm -ne "YES") { $NoLogonBanner = $false; Warn "Banner suppression skipped" }
     }
     if ($NoLogonBanner) {

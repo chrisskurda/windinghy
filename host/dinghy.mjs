@@ -5,6 +5,8 @@
 // launchers that open as RemoteApp windows via Microsoft's "Windows App".
 //
 // Commands:
+//   dinghy setup                hands-free setup via the UTM guest agent (falls back to serve-setup)
+//   dinghy fix [session|rdp|clock|server]  repair common guest problems via the guest agent
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
 //                               (--no-banner or config suppressBanner=on: keep the Windows banner suppressed; opt-in, may violate network policy)
 //   dinghy status               guest health / version / metrics
@@ -21,6 +23,8 @@ import path from "node:path";
 import http from "node:http";
 import { execFileSync, spawnSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import crypto from "node:crypto";
+import * as G from "./guest.mjs";
 
 // Single source of truth for the WinDinghy version. Release: bump this,
 // move CHANGELOG "Unreleased" entries under the new version, tag vX.Y.Z.
@@ -31,7 +35,7 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PAYLOAD_DIR = path.join(PROJECT_ROOT, "payload");
 const CONFIG_DIR = path.join(os.homedir(), ".config", "windinghy");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const SETUP_PORT = 8756;
+const SETUP_PORT = Number(process.env.DINGHY_SETUP_PORT) || 8756;
 
 const DEFAULTS = {
     host: "192.168.64.8",
@@ -787,19 +791,23 @@ async function cmdDoctor(cfg) {
     const checks = [];
     const add = (ok, label, advice) => checks.push({ ok, label, advice });
 
-    add(fs.existsSync("/Applications/Windows App.app"), "Windows App installed",
-        "Install it from the Mac App Store (search: Windows App).");
+    if (nativeBin(cfg) && cfg.client !== "windows-app") {
+        add(true, `native RDP client (${nativeBin(cfg)})`, "");
+    } else {
+        add(fs.existsSync("/Applications/Windows App.app"), "RDP client (Windows App) installed",
+            "Run scripts/build-freerdp.sh for the native client, or install Windows App from the Mac App Store.");
+    }
     add(fs.existsSync("/Applications/UTM.app"), "UTM installed",
         "Install from https://mac.getutm.app");
     add(true, `node ${process.version}`, "");
     const cfgExists = fs.existsSync(CONFIG_PATH);
-    add(cfgExists, "dinghy config present", "Run: dinghy sync (or dinghy serve-setup for first-time setup)");
+    add(cfgExists, "dinghy config present", "Run: dinghy setup");
     const alive = await guestAlive(cfg, 3000);
     add(alive, `guest agent at ${cfg.host}:${cfg.apiPort}`,
-        "VM off or agent not installed. Start the VM in UTM; for first-time guest setup run `dinghy serve-setup` on the Mac, then paste the printed one-liner into an elevated PowerShell inside Windows.");
+        "VM off or guest components not installed. Run: dinghy setup (it starts the VM and installs everything), or dinghy fix if it was working before.");
     const rdp = await portOpen(cfg.host, cfg.rdpPort);
     add(rdp, `RDP at ${cfg.host}:${cfg.rdpPort}`,
-        "RDP host not enabled in the guest — re-run the serve-setup one-liner inside Windows (needs Windows Pro/Enterprise).");
+        "RDP isn't reachable. Run: dinghy fix rdp (needs Windows Pro/Enterprise).");
     if (alive) {
         // Clock skew breaks CredSSP with opaque security errors (0x1807)
         try {
@@ -807,8 +815,12 @@ async function cmdDoctor(cfg) {
             const guestTime = new Date(res.headers.get("date")).getTime();
             const skew = Math.abs(Date.now() - guestTime) / 1000;
             add(skew < 120, `guest clock skew ${Math.round(skew)}s`,
-                "Guest clock has drifted — RDP auth will fail with security errors. In the VM run: w32tm /resync (or re-run the serve-setup one-liner, which installs a 15-min sync task).");
+                "Guest clock has drifted — RDP auth will fail with security errors. Run: dinghy fix clock");
         } catch {}
+    }
+    if (G.utmInstalled() && G.vmStatus(cfg.vmName) === "started") {
+        add(G.agentUp(cfg.vmName), "UTM guest agent (enables dinghy setup / fix)",
+            "In UTM choose Virtual Machine > Install Windows Guest Tools, run the installer in Windows once, then: dinghy setup");
     }
     add(fs.existsSync(path.join(PROJECT_ROOT, "host", "dinghy-update.sh")), "updater available",
         "This checkout is missing host/dinghy-update.sh — re-clone the repo.");
@@ -860,18 +872,8 @@ function detectServeIp(cfg) {
 
 // With json=true (used by the menu-bar app) the first stdout line is
 // machine-readable: {"url": ..., "oneliner": ...}; human logs are suppressed.
-async function cmdServeSetup(cfg, json = false, noBanner = false) {
-    noBanner = noBanner || cfg.suppressBanner === "on";
-    if (noBanner && !json) {
-        console.log("WARNING: logon-banner suppression is ON. The Windows banner may be your organization's");
-        console.log("acceptable-use / network policy notice; hiding it may violate that policy. The guest will");
-        console.log("ask you to type YES before it applies this, and keeps it suppressed with a scheduled task.\n");
-    }
-    if (!fs.existsSync(path.join(PAYLOAD_DIR, "setup.ps1")))
-        throw new Error(`Guest payload not found at ${PAYLOAD_DIR} — run from a full windinghy checkout.`);
-    const ip = detectServeIp(cfg);
-    if (!ip) throw new Error(`No local interface on the guest's subnet (${cfg.host}/24). Is the VM running with shared networking?`);
-
+// Serves the guest payload (setup.ps1, payload.zip) and receives the logon banner.
+function startSetupServer(cfg, ip, noBanner, log = true) {
     const baseUrl = `http://${ip}:${SETUP_PORT}`;
     const setupTemplate = fs.readFileSync(path.join(PAYLOAD_DIR, "setup.ps1"), "utf8");
     const setupScript = setupTemplate.replace("__BASE_URL__", baseUrl).replace("__NO_BANNER__", noBanner ? "$true" : "$false");
@@ -884,11 +886,11 @@ async function cmdServeSetup(cfg, json = false, noBanner = false) {
 
     const server = http.createServer((req, res) => {
         if (req.url === "/setup.ps1") {
-            console.log(`  [${new Date().toLocaleTimeString()}] guest fetched setup.ps1`);
+            if (log) console.log(`  [${new Date().toLocaleTimeString()}] guest fetched setup.ps1`);
             res.writeHead(200, { "Content-Type": "text/plain" });
             res.end(setupScript);
         } else if (req.url === "/payload.zip") {
-            console.log(`  [${new Date().toLocaleTimeString()}] guest fetched payload.zip (${(zipBuf.length / 1e6).toFixed(1)} MB)`);
+            if (log) console.log(`  [${new Date().toLocaleTimeString()}] guest fetched payload.zip (${(zipBuf.length / 1e6).toFixed(1)} MB)`);
             res.writeHead(200, { "Content-Type": "application/zip", "Content-Length": zipBuf.length });
             res.end(zipBuf);
         } else if (req.url === "/banner" && req.method === "POST") {
@@ -899,7 +901,7 @@ async function cmdServeSetup(cfg, json = false, noBanner = false) {
                     const b = JSON.parse(body);
                     fs.mkdirSync(CONFIG_DIR, { recursive: true });
                     fs.writeFileSync(BANNER_PATH, JSON.stringify({ caption: String(b.caption ?? ""), text: String(b.text ?? "") }, null, 2) + "\n");
-                    console.log(`  [${new Date().toLocaleTimeString()}] guest reported its logon banner`);
+                    if (log) console.log(`  [${new Date().toLocaleTimeString()}] guest reported its logon banner`);
                     res.writeHead(204);
                 } catch { res.writeHead(400); }
                 res.end();
@@ -910,6 +912,29 @@ async function cmdServeSetup(cfg, json = false, noBanner = false) {
         }
     });
     server.listen(SETUP_PORT, ip);
+
+    server.on("error", e => {
+        console.error(e.code === "EADDRINUSE"
+            ? `Port ${SETUP_PORT} is busy: another WinDinghy setup server is running (stop it from the menu bar, or kill the old "dinghy serve-setup").`
+            : `Setup server error: ${e.message}`);
+        process.exit(1);
+    });
+    return { server, baseUrl };
+}
+
+async function cmdServeSetup(cfg, json = false, noBanner = false) {
+    noBanner = noBanner || cfg.suppressBanner === "on";
+    if (noBanner && !json) {
+        console.log("WARNING: logon-banner suppression is ON. The Windows banner may be your organization's");
+        console.log("acceptable-use / network policy notice; hiding it may violate that policy. The guest will");
+        console.log("ask you to type YES before it applies this, and keeps it suppressed with a scheduled task.\n");
+    }
+    if (!fs.existsSync(path.join(PAYLOAD_DIR, "setup.ps1")))
+        throw new Error(`Guest payload not found at ${PAYLOAD_DIR} — run from a full windinghy checkout.`);
+    const ip = detectServeIp(cfg);
+    if (!ip) throw new Error(`No local interface on the guest's subnet (${cfg.host}/24). Is the VM running with shared networking?`);
+
+    const { server, baseUrl } = startSetupServer(cfg, ip, noBanner);
 
     const oneliner = `irm ${baseUrl}/setup.ps1 | iex`;
     if (json) {
@@ -938,6 +963,189 @@ async function cmdServeSetup(cfg, json = false, noBanner = false) {
     if (!json) console.log(`Guest server is UP. Running first sync ...`);
     server.close();
     await cmdSync(cfg);
+}
+
+// ---------- hands-free setup and repair (UTM guest agent) ----------
+// `dinghy setup` and `dinghy fix` drive the guest through utmctl's guest agent
+// (see guest.mjs), so a new user doesn't paste commands into Windows.
+
+function say(msg) { console.log(msg); }
+function stepSay(msg) { console.log(`==> ${msg}`); }
+
+const AGENT_HELP = `The UTM guest agent isn't running in Windows. One-time step: in UTM choose
+"Virtual Machine > Install Windows Guest Tools" (or install utm-guest-tools from UTM's
+guest tools ISO inside Windows). Then run this command again.`;
+
+function randomPassword() {
+    const pick = (set, n) => Array.from(crypto.randomBytes(n), b => set[b % set.length]).join("");
+    const pw = pick("ABCDEFGHJKLMNPQRSTUVWXYZ", 5) + pick("abcdefghijkmnopqrstuvwxyz", 7) +
+               pick("23456789", 4) + pick("-_.!#%+=", 3);
+    return pw.split("").sort(() => crypto.randomInt(3) - 1).join("");
+}
+
+// Pick the UTM VM to manage: the configured one, else the only/running one, else ask.
+function chooseVm(cfg) {
+    const vms = G.listVms();
+    if (!vms.length) throw new Error("UTM has no virtual machines. Create or import a Windows 11 ARM VM in UTM first.");
+    let vm = vms.find(v => v.name === cfg.vmName);
+    if (!vm) {
+        const running = vms.filter(v => v.status === "started");
+        vm = running.length === 1 ? running[0] : vms.length === 1 ? vms[0] : null;
+    }
+    if (!vm) {
+        const names = vms.map(v => `"${asq(v.name)}"`).join(", ");
+        const pick = asDialog(`choose from list {${names}} with title "WinDinghy" with prompt "Which UTM virtual machine runs Windows?"`);
+        vm = vms.find(v => v.name === pick);
+        if (!vm) throw new Error("No VM chosen.");
+    }
+    if (cfg.vmName !== vm.name) { cfg.vmName = vm.name; saveConfig(cfg); }
+    return vm;
+}
+
+async function waitFor(fn, seconds, everyMs = 3000) {
+    const end = Date.now() + seconds * 1000;
+    while (Date.now() < end) {
+        if (await fn()) return true;
+        await new Promise(r => setTimeout(r, everyMs));
+    }
+    return false;
+}
+
+// Choose the guest address that sits on one of this Mac's vmnet bridges.
+function pickGuestIp(ips) {
+    const nets = [];
+    for (const [ifname, addrs] of Object.entries(os.networkInterfaces()))
+        if (ifname.startsWith("bridge")) for (const a of addrs ?? []) if (a.family === "IPv4") nets.push(a.address.split(".").slice(0, 3).join("."));
+    return ips.find(ip => nets.includes(ip.split(".").slice(0, 3).join("."))) ?? null;
+}
+
+async function cmdSetup(cfg, args) {
+    let noBanner = args.includes("--no-banner") || cfg.suppressBanner === "on";
+    if (!G.utmInstalled()) {
+        spawnSync("open", ["https://mac.getutm.app"]);
+        throw new Error("UTM isn't installed. Install it (https://mac.getutm.app), create a Windows 11 ARM VM, then run: dinghy setup");
+    }
+    stepSay("Finding your Windows VM");
+    const vm = chooseVm(cfg);
+    say(`    ${vm.name} (${vm.status})`);
+    if (vm.status !== "started") {
+        stepSay("Starting the VM");
+        G.startVm(vm.name);
+        if (!await waitFor(() => G.vmStatus(vm.name) === "started", 90, 2000)) throw new Error("The VM didn't start. Start it in UTM and run dinghy setup again.");
+    }
+
+    stepSay("Waiting for the UTM guest agent");
+    if (!await waitFor(() => G.agentUp(vm.name), 240)) {
+        say(`    Not available yet.\n${AGENT_HELP.split("\n").map(l => "    " + l).join("\n")}`);
+        say(`\nFalling back to the manual one-liner so you're not blocked:\n`);
+        return cmdServeSetup(cfg, false, noBanner);
+    }
+    const ip = pickGuestIp(G.guestIps(vm.name));
+    if (!ip) throw new Error("The VM has no address on UTM's shared network. In UTM, set the VM's first network device to \"Shared Network\".");
+    if (ip !== cfg.host) { cfg.host = ip; saveConfig(cfg); }
+    say(`    guest agent OK, VM at ${ip}`);
+
+    if (noBanner) {
+        const ok = asDialog(`button returned of (display dialog "You asked WinDinghy to keep Windows' logon banner suppressed.\\n\\nThat banner may be your organization's acceptable-use or network policy notice. Hiding it may violate that policy, and you are responsible for deciding this is OK." with title "WinDinghy" with icon caution buttons {"Keep the banner", "Suppress it"} default button "Keep the banner")`);
+        if (ok !== "Suppress it") { noBanner = false; say("    Banner suppression skipped."); }
+    }
+
+    stepSay("Installing the WinDinghy guest components (a minute or two)");
+    const serveIp = detectServeIp(cfg);
+    if (!serveIp) throw new Error(`No local interface on the guest's subnet (${cfg.host}/24).`);
+    const { server, baseUrl } = startSetupServer(cfg, serveIp, noBanner, false);
+    try {
+        const r = G.ps(vm.name, `irm ${baseUrl}/setup.ps1 | iex`, { env: noBanner ? { WINDINGHY_YES: "YES" } : {}, timeout: 600000 });
+        if (r.output) say(r.output.split("\n").map(l => "    " + l).join("\n"));
+        if (!await waitFor(() => guestAlive(cfg, 2500), 90)) throw new Error("The guest server didn't come up. Run: dinghy fix");
+    } finally {
+        server.close();
+    }
+
+    if (!cfg.username) {
+        stepSay("Creating a dedicated Windows account for your apps");
+        const user = "WinDinghy";
+        const pw = randomPassword();
+        const r = G.ps(vm.name, [
+            `$u='${user}'; $p=ConvertTo-SecureString '${pw}' -AsPlainText -Force`,
+            `if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) { Set-LocalUser -Name $u -Password $p } else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName 'WinDinghy apps' | Out-Null }`,
+            `foreach ($g in 'Remote Desktop Users','Administrators') { Add-LocalGroupMember -Group $g -Member $u -ErrorAction SilentlyContinue }`,
+            `'account ready'`,
+        ].join("; "), { secret: true });
+        if (!/account ready/.test(r.output)) throw new Error(`Couldn't create the account:\n${r.output}`);
+        cfg.username = user;
+        saveConfig(cfg);
+        if (!keychainSet(user, pw)) throw new Error("Couldn't save the new password to the Keychain.");
+        say(`    account "${user}" created; its password is in your macOS Keychain`);
+    } else if (!keychainGet(winUser(cfg))) {
+        say(`    Using the Windows account ${winUser(cfg)}; WinDinghy will ask for its password on first launch (once).`);
+    }
+
+    stepSay("Syncing your Windows apps");
+    await cmdSync(cfg);
+    say(`\nDone. Open any app from ~/Applications/WinDinghy, or run: dinghy launch "<app>"`);
+}
+
+// Console session of the configured user (blocks RemoteApp): returns the session id or null.
+function consoleSessionId(cfg, vm) {
+    const user = winUser(cfg).split("\\").pop();
+    if (!user) return null;
+    const r = G.ps(vm, `qwinsta | ForEach-Object { if ($_ -match '^\\s*>?console\\s+(\\S+)\\s+(\\d+)') { "$($matches[1])|$($matches[2])" } }`, { timeout: 60000 });
+    for (const line of r.output.split("\n")) {
+        const [u, id] = line.trim().split("|");
+        if (u && id && u.toLowerCase() === user.toLowerCase()) return Number(id);
+    }
+    return null;
+}
+
+async function cmdFix(cfg, args) {
+    const which = args[0] && !args[0].startsWith("-") ? args[0] : "all";
+    const valid = ["all", "session", "rdp", "clock", "server"];
+    if (!valid.includes(which)) throw new Error(`Usage: dinghy fix [${valid.join("|")}]`);
+    if (!G.utmInstalled()) throw new Error("UTM isn't installed.");
+    const vm = chooseVm(cfg).name;
+    if (G.vmStatus(vm) !== "started") { say(`VM "${vm}" isn't running. Start it (menu bar > Start VM, or: dinghy launch "<app>") and try again.`); return; }
+    if (!G.agentUp(vm)) { say(AGENT_HELP); process.exitCode = 1; return; }
+    await findGuest(cfg);
+    let fixed = 0;
+    const all = which === "all";
+
+    if (all || which === "server") {
+        if (!await guestAlive(cfg, 2500)) {
+            stepSay("Guest server isn't answering: restarting it");
+            const r = G.ps(vm, `Restart-Service WinBoatGuestServer -ErrorAction Stop; 'restarted'`);
+            say(`    ${/restarted/.test(r.output) ? "restarted" : "couldn't restart: " + r.output}`);
+            fixed++;
+        } else if (!all) say("Guest server is fine.");
+    }
+    if (all || which === "clock") {
+        const skew = await guestClockSkew(cfg);
+        if (skew > 60 || !all) {
+            stepSay(`Resyncing the Windows clock${skew ? ` (off by ${Math.round(skew)}s)` : ""}`);
+            G.ps(vm, `w32tm /resync /force`);
+            fixed++;
+        }
+    }
+    if (all || which === "rdp") {
+        if (!await portOpen(cfg.host, cfg.rdpPort) || !all) {
+            stepSay("Making sure Remote Desktop is on and reachable");
+            const r = G.ps(vm, `Set-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server' fDenyTSConnections 0; Get-NetFirewallRule -Name 'RemoteDesktop-UserMode-In-TCP' -ErrorAction SilentlyContinue | Enable-NetFirewallRule; Restart-Service TermService -Force; 'ok'`);
+            say(`    ${/ok$/.test(r.output) ? "done" : r.output}`);
+            fixed++;
+        }
+    }
+    if (all || which === "session") {
+        const id = consoleSessionId(cfg, vm);
+        if (id != null) {
+            const yes = asDialog(`button returned of (display dialog "You're signed in to the Windows VM's own screen (UTM) as ${asq(winUser(cfg))}. Windows apps can't open through WinDinghy while that session exists.\\n\\nSign it out now? Unsaved work in that Windows session will be lost." with title "WinDinghy" with icon caution buttons {"Leave it", "Sign out"} default button "Leave it")`);
+            if (yes === "Sign out") {
+                stepSay("Signing out the console session");
+                G.ps(vm, `logoff ${id}`);
+                fixed++;
+            } else say("Left the console session alone.");
+        } else if (!all) say("No console session is blocking RemoteApp.");
+    }
+    say(fixed ? `\nApplied ${fixed} fix${fixed === 1 ? "" : "es"}. Try your app again.` : `\nNothing needed fixing.`);
 }
 
 // Delegates to the repo-root `update` launcher (installed from the tracked
@@ -996,6 +1204,8 @@ try {
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
         case "update":      cmdUpdate(); break;
         case "login":       cmdLogin(cfg); break;
+        case "setup":       await cmdSetup(cfg, rest); break;
+        case "fix":         await cmdFix(cfg, rest); break;
         case "version":
         case "--version":
         case "-v":          console.log(`dinghy ${VERSION}`); break;

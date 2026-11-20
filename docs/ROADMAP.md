@@ -24,6 +24,50 @@ Recommended order: (1) host profiles + cert pinning, (2) authenticated TLS
 proxy for the guest API, (3) document WireGuard/Tailscale/SSH tunnel as the
 zero-code alternative, (4) RD Gateway support.
 
+## Own the VM (no UTM, near-zero setup for new users)
+
+UTM works well when the user builds their own Windows VM. To remove that burden,
+WinDinghy can create and run the VM itself.
+
+Options considered (Apple Silicon, Windows 11 ARM guest):
+
+| Option | Scriptable | Verdict |
+|---|---|---|
+| **QEMU + Hypervisor.framework (HVF), headless** | Fully: QMP socket, qemu-guest-agent, unattended install | **Recommended.** Same engine UTM uses; free; no GUI needed because RemoteApp renders over RDP. |
+| UTM (QEMU or Apple backend) | `utmctl` (start/stop/exec/file/ip) | Keep as "bring your own VM"; best path for users who already have one. |
+| VMware Fusion (free, Broadcom account) | `vmrun` | Viable fallback; closed, heavier, account required. Guest ops on ARM unverified. |
+| Parallels | `prlctl` | Best UX/perf but paid; not a default. |
+| Apple Virtualization.framework | n/a | No Windows guests (no drivers / vTPM). |
+| Docker / containers | n/a | No `/dev/kvm` on macOS: pure emulation. |
+
+Design for the QEMU backend:
+- Headless VM, **user-mode networking with host port forwards** (e.g. 127.0.0.1:13389 -> 3389,
+  :17148 -> 7148). No vmnet, no DHCP address changes, no root, and the address WinDinghy
+  uses never moves (this replaces the discover/MAC logic for managed VMs).
+- Control over QMP (lifecycle) and the qemu guest agent over a virtio-serial socket
+  (exec, file, IPs) - the same operations `guest.mjs` already abstracts for UTM.
+- Unattended install: autounattend.xml (local account with a random password stored in the
+  Keychain, Pro edition, RDP on) + virtio drivers injected, FirstLogonCommands install the
+  guest agent and run `setup.ps1`. TPM via swtpm (Windows 11 can also be installed with
+  the TPM check bypassed).
+- The only user input: supply (or let WinDinghy open the download page for) the Windows 11
+  ARM64 ISO. Everything else is automatic.
+- Disk lives under `~/Library/Application Support/WinDinghy/vm` or a user-chosen volume;
+  qcow2 snapshots give "rewind to clean".
+
+Existing projects doing the same thing, useful as references (check licenses before reuse):
+[windows-desktop-vm](https://github.com/milesbuckton/windows-desktop-vm),
+[winvm](https://github.com/stuffbucket/winvm),
+[vitrine](https://github.com/cioufong/vitrine),
+[SiliconWin](https://github.com/OathWallet/SiliconWin),
+[alcove](https://github.com/YangTaeyoung/alcove).
+Open question from their notes: TPM under HVF depends on the QEMU version (alcove disables
+it; vitrine and SiliconWin use swtpm).
+
+Order: (1) `guest.mjs` transport (done for UTM), (2) QEMU transport behind the same
+interface + `dinghy vm create/start/stop/snapshot`, (3) unattended installer, (4) make
+it the default, UTM stays supported.
+
 ## Connection manager (no RemoteApp)
 A general RDP connection manager built on the same patched FreeRDP:
 - Host profiles (address, user, Keychain ref, gateway, resolution/scaling,

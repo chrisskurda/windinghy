@@ -15,7 +15,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv windinghy-menubar "$APP/Contents/MacOS/"
 # Bundle a copy of dinghy.mjs so Sync works even if the repo moves
-cp "$REPO_ROOT/host/dinghy.mjs" "$APP/Contents/Resources/dinghy.mjs"
+cp "$REPO_ROOT/host/dinghy.mjs" "$REPO_ROOT/host/guest.mjs" "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
