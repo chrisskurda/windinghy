@@ -67,23 +67,43 @@ export function exec(name, argv, { env = {}, input, timeout = 300000 } = {}) {
 
 export function pull(name, guestPath) {
     const r = utm(["file", "pull", name, guestPath], { timeout: 30000 });
-    return r.status === 0 ? r.stdout : null;
+    // A missing file still exits 0; the failure is only reported on stderr.
+    return r.status === 0 && !/failed|error/i.test(r.stderr) ? r.stdout : null;
 }
 
 export function push(name, guestPath, buf) {
     return utm(["file", "push", name, guestPath], { input: buf, timeout: 120000 }).status === 0;
 }
 
-const OUT = "C:\\Windows\\Temp\\dinghy-out.txt";
+import crypto from "node:crypto";
 
-// Run a PowerShell script in the guest. Output is captured by redirecting it to a
-// file and pulling that back (exec only returns the exit code).
+// Run a PowerShell script in the guest and return its output.
+//
+// utmctl exec is asynchronous: it returns as soon as the guest agent has started the
+// process, not when it finishes. So the script writes its output to a temp file and
+// renames it to a unique final name when done (an atomic "finished" marker); we poll
+// for that file with `file pull` until it appears or the timeout passes.
 export function ps(name, script, { env = {}, timeout = 300000, secret = false } = {}) {
-    const wrapped = `$ErrorActionPreference='Continue'; & { ${script} } *>&1 | Out-String | Set-Content -Encoding UTF8 -Path '${OUT}'`;
+    const id = crypto.randomBytes(6).toString("hex");
+    const tmp = `C:\\Windows\\Temp\\dinghy-${id}.tmp`;
+    const out = `C:\\Windows\\Temp\\dinghy-${id}.out`;
+    const wrapped = `$ErrorActionPreference='Continue'; & { ${script} } *>&1 | Out-String | Set-Content -Encoding UTF8 -Path '${tmp}'; Move-Item -Force '${tmp}' '${out}'`;
     // secret: send the script on stdin so it never appears in a process list on the Mac.
     const r = secret
-        ? exec(name, ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"], { env, timeout, input: wrapped + "\n" })
-        : exec(name, ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(wrapped, "utf16le").toString("base64")], { env, timeout });
-    const out = pull(name, OUT);
-    return { status: r.status, output: out ? out.toString("utf8").replace(/^\uFEFF/, "").trim() : "", timedOut: r.timedOut };
+        ? exec(name, ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"], { env, timeout: 30000, input: wrapped + "\n" })
+        : exec(name, ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(wrapped, "utf16le").toString("base64")], { env, timeout: 30000 });
+    if (r.status !== 0 && !r.timedOut) return { status: r.status, output: "", timedOut: false, error: r.stderr };
+    const deadline = Date.now() + timeout;
+    let buf = null;
+    while (Date.now() < deadline) {
+        buf = pull(name, out);
+        if (buf) break;
+        spawnSync("sleep", ["1.5"]);
+    }
+    if (buf) exec(name, ["cmd.exe", "/c", `del "${out}"`], { timeout: 15000 }); // tidy up
+    return {
+        status: buf ? 0 : -1,
+        output: buf ? buf.toString("utf8").replace(/^\uFEFF/, "").trim() : "",
+        timedOut: !buf,
+    };
 }

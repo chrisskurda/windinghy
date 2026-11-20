@@ -53,7 +53,9 @@ bumps may include breaking changes).
 - `dinghy fix [session|rdp|clock|server]` repairs common guest problems the
   same way (clock drift, RDP, the guest server, a blocking console session
   after a confirmation). `doctor` now points at these.
-- `host/guest.mjs`: guest transport over `utmctl exec/file/ip-address`.
+- `host/guest.mjs`: guest transport over `utmctl exec/file/ip-address`. Note `utmctl
+  exec` is asynchronous, so output is collected through a unique result file that
+  the script renames when finished, polled with `file pull`.
 
 ### Fixed
 
