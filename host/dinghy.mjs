@@ -998,18 +998,19 @@ function switchBackend(cfg, to, defaults = {}) {
 }
 
 function findWindowsIso() {
-    const dirs = [path.join(os.homedir(), "Downloads"), path.join(os.homedir(), "Desktop")];
+    // Any large ISO in Downloads that isn't clearly x64, newest first (CrystalFetch, Microsoft's
+    // evaluation center and UUP tools all name theirs differently). Pass --iso to pick another.
+    const dir = path.join(os.homedir(), "Downloads");
     const hits = [];
-    for (const d of dirs) {
-        let names = [];
-        try { names = fs.readdirSync(d); } catch {}
-        for (const n of names) {
-            if (!/\.iso$/i.test(n)) continue;
-            const full = path.join(d, n);
-            let size = 0;
-            try { size = fs.statSync(full).size; } catch {}
-            if (size > 3e9 && /(iot|ltsc|win(dows)?[-_ ]?11|a64|arm64)/i.test(n) && /(a64|arm)/i.test(n)) hits.push({ full, mtime: fs.statSync(full).mtimeMs });
-        }
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    for (const n of names) {
+        if (!/\.iso$/i.test(n) || /(x64|amd64|x86_64|win11_.*x64)/i.test(n)) continue;
+        const full = path.join(dir, n);
+        try {
+            const st = fs.statSync(full);
+            if (st.isFile() && st.size > 3e9) hits.push({ full, mtime: st.mtimeMs });
+        } catch {}
     }
     return hits.sort((a, b) => b.mtime - a.mtime)[0]?.full ?? null;
 }
@@ -1070,6 +1071,10 @@ async function vmCreate(cfg, args) {
     if (!iso) iso = await waitForIsoDownload();
     if (!fs.existsSync(iso)) throw new Error(`ISO not found: ${iso}`);
     say(`    ${iso}`);
+    const editions = VM.isoEditions(iso);
+    const edition = VM.chooseEdition(editions);
+    if (editions.length) say(`    editions: ${editions.map(e => `${e.index}=${e.name}`).join("; ")}`);
+    say(`    installing: ${edition.name || "image " + edition.index}${edition.index !== 1 || editions.length > 1 ? ` (index ${edition.index})` : ""}`);
     const virtio = await ensureVirtioIso();
 
     stepSay("Preparing the VM");
@@ -1077,7 +1082,7 @@ async function vmCreate(cfg, args) {
     const password = randomPassword();
     if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
     VM.createDisk(cfg, gb);
-    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT });
+    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT, imageIndex: edition.index });
     const { server } = startSetupServer(cfg, "127.0.0.1", false, false, `http://10.0.2.2:${SETUP_PORT}`);
     try {
         VM.start(cfg, { windows: iso, unattend, virtio }, { ramMB, cpus });

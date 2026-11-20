@@ -183,6 +183,48 @@ export function destroy(cfg) {
     fs.rmSync(vmDir(cfg), { recursive: true, force: true });
 }
 
+// ---------- reading the Windows ISO ----------
+
+// List the editions in a Windows ISO's install.wim by reading the WIM's XML metadata directly
+// (no wimlib needed): [{ index, name, edition }]. Returns [] if it can't be read.
+export function isoEditions(isoPath) {
+    const att = spawnSync("hdiutil", ["attach", "-nobrowse", "-readonly", "-plist", isoPath], { encoding: "utf8" });
+    if (att.status !== 0) return [];
+    const mount = (att.stdout.match(/<key>mount-point<\/key>\s*<string>([^<]+)<\/string>/) ?? [])[1];
+    try {
+        if (!mount) return [];
+        const wim = ["install.wim", "install.swm"].map(n => path.join(mount, "sources", n)).find(p => fs.existsSync(p));
+        if (!wim) return [];
+        const fd = fs.openSync(wim, "r");
+        try {
+            const hdr = Buffer.alloc(0x60);
+            fs.readSync(fd, hdr, 0, hdr.length, 0);
+            if (hdr.toString("latin1", 0, 5) !== "MSWIM") return [];
+            // XML data resource descriptor at 0x48: size (7 bytes) + flags, offset (8), original size (8)
+            const size = Number(hdr.readUIntLE(0x48, 6));
+            const offset = Number(hdr.readBigUInt64LE(0x50));
+            if (!size || size > 8e6) return [];
+            const xmlBuf = Buffer.alloc(size);
+            fs.readSync(fd, xmlBuf, 0, size, offset);
+            const xmlText = xmlBuf.toString("utf16le");
+            const out = [];
+            for (const m of xmlText.matchAll(/<IMAGE INDEX="(\d+)">([\s\S]*?)<\/IMAGE>/g)) {
+                const name = (m[2].match(/<NAME>([^<]*)<\/NAME>/) ?? [])[1] ?? "";
+                const edition = (m[2].match(/<EDITIONID>([^<]*)<\/EDITIONID>/) ?? [])[1] ?? "";
+                out.push({ index: Number(m[1]), name, edition });
+            }
+            return out;
+        } finally { fs.closeSync(fd); }
+    } catch { return []; }
+    finally { spawnSync("hdiutil", ["detach", mount ?? "", "-quiet"]); }
+}
+
+// Prefer an Enterprise/IoT edition (what WinDinghy targets), then Pro, then the first image.
+export function chooseEdition(editions) {
+    const pick = re => editions.find(e => re.test(`${e.edition} ${e.name}`));
+    return pick(/IoTEnterprise|Enterprise/i) ?? pick(/Professional|Pro\b/i) ?? editions[0] ?? { index: 1, name: "(unknown)", edition: "" };
+}
+
 // IANA zone -> Windows zone id for the unattended install (UTC if unknown).
 const WIN_TZ = {
     "America/New_York": "Eastern Standard Time", "America/Detroit": "Eastern Standard Time", "America/Chicago": "Central Standard Time",
@@ -197,7 +239,7 @@ function xml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").
 // autounattend.xml for Windows 11 IoT Enterprise LTSC (arm64): GPT/UEFI layout, local admin account,
 // autologon once, and a FirstLogon script that installs the virtio drivers + guest agent and
 // then runs WinDinghy's setup.ps1 from the Mac.
-export function unattendXml({ user, password }) {
+export function unattendXml({ user, password, imageIndex = 1 }) {
     const tz = WIN_TZ[Intl.DateTimeFormat().resolvedOptions().timeZone] ?? "UTC";
     const c = (name, pass, body) => `    <component name="${name}" processorArchitecture="arm64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n${body}\n    </component>`;
     const lab = ["BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassCPUCheck", "BypassStorageCheck"]
@@ -231,7 +273,7 @@ ${part(3, "Primary", 0, true)}
       </DiskConfiguration>
       <ImageInstall><OSImage>
         <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
-        <InstallFrom><MetaData wcm:action="add"><Key>/IMAGE/INDEX</Key><Value>1</Value></MetaData></InstallFrom>
+        <InstallFrom><MetaData wcm:action="add"><Key>/IMAGE/INDEX</Key><Value>${imageIndex}</Value></MetaData></InstallFrom>
       </OSImage></ImageInstall>
       <UserData><AcceptEula>true</AcceptEula></UserData>`)}
   </settings>
@@ -286,10 +328,10 @@ Stop-Transcript | Out-Null
 }
 
 // Build the answer-file CD (autounattend.xml + firstlogon.ps1) with macOS's hdiutil.
-export function buildUnattendIso(cfg, { user, password, setupPort }) {
+export function buildUnattendIso(cfg, { user, password, setupPort, imageIndex = 1 }) {
     const f = files(cfg);
     const stage = fs.mkdtempSync(path.join(os.tmpdir(), "dinghy-unattend-"));
-    fs.writeFileSync(path.join(stage, "autounattend.xml"), unattendXml({ user, password }));
+    fs.writeFileSync(path.join(stage, "autounattend.xml"), unattendXml({ user, password, imageIndex }));
     fs.writeFileSync(path.join(stage, "firstlogon.ps1"), firstLogonScript(setupPort));
     fs.rmSync(f.unattend, { force: true });
     const r = spawnSync("hdiutil", ["makehybrid", "-iso", "-joliet", "-default-volume-name", "UNATTEND", "-o", f.unattend, stage], { encoding: "utf8" });
