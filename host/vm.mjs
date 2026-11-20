@@ -90,6 +90,22 @@ export function sendKeys(cfg, qcodes) {
     return qmp(cfg, "send-key", { keys: qcodes.map(k => ({ type: "qcode", data: k })) });
 }
 
+// Type text into the guest via QMP key events (debugging aid: e.g. drive a Shift+F10 prompt in Setup).
+const SHIFTED = { ":": "semicolon", "$": "4", "~": "grave_accent", "|": "backslash", "_": "minus", "+": "equal", '"': "apostrophe", "<": "comma", ">": "dot", "?": "slash", "{": "bracket_left", "}": "bracket_right", "(": "9", ")": "0", "&": "7", "*": "8", "%": "5", "#": "3", "@": "2", "!": "1" };
+const PLAIN = { " ": "spc", "\\": "backslash", ".": "dot", ",": "comma", "-": "minus", "=": "equal", "/": "slash", ";": "semicolon", "'": "apostrophe", "[": "bracket_left", "]": "bracket_right", "`": "grave_accent", "\n": "ret" };
+export function typeText(cfg, text) {
+    for (const ch of text) {
+        let keys;
+        if (/[a-z0-9]/.test(ch)) keys = [ch];
+        else if (/[A-Z]/.test(ch)) keys = ["shift", ch.toLowerCase()];
+        else if (SHIFTED[ch]) keys = ["shift", SHIFTED[ch]];
+        else if (PLAIN[ch]) keys = [PLAIN[ch]];
+        else continue;
+        sendKeys(cfg, keys);
+        spawnSync("sleep", ["0.12"]);
+    }
+}
+
 export function screenshot(cfg, file = files(cfg).shot) {
     qmp(cfg, "screendump", { filename: file, format: "png" });
     return fs.existsSync(file) ? file : null;
@@ -128,12 +144,19 @@ export function qemuArgs(cfg, media = {}, { ramMB = 4096, cpus = 4 } = {}) {
         "-pidfile", f.pid,
         "-daemonize",
     ];
-    let boot = 1;
-    for (const key of ["windows", "unattend", "virtio"]) {
+    // The Windows ISO is ~5 GB and Setup reads all of it, so it must be on a fast device: emulated
+    // USB storage manages only ~1.4 MB/s, while a virtio-scsi CD-ROM is fast (Setup loads its
+    // vioscsi driver from the virtio ISO via DriverPaths in the answer file). The two small ISOs
+    // (answer file, drivers) stay on USB, which the firmware and Windows read without drivers.
+    if (media.windows) {
+        a.push("-device", "virtio-scsi-pci,id=scsi0");
+        a.push("-drive", `file=${media.windows},media=cdrom,if=none,id=cd_windows,readonly=on`);
+        a.push("-device", "scsi-cd,drive=cd_windows,bus=scsi0.0,bootindex=1");
+    }
+    for (const key of ["unattend", "virtio"]) {
         if (!media[key]) continue;
-        const id = `cd_${key}`;
-        a.push("-drive", `file=${media[key]},media=cdrom,if=none,id=${id},readonly=on`);
-        a.push("-device", `usb-storage,drive=${id}${key === "windows" ? `,bootindex=${boot++}` : ""}`);
+        a.push("-drive", `file=${media[key]},media=cdrom,if=none,id=cd_${key},readonly=on`);
+        a.push("-device", `usb-storage,drive=cd_${key}`);
     }
     return a;
 }
@@ -242,8 +265,10 @@ function xml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").
 export function unattendXml({ user, password, imageIndex = 1 }) {
     const tz = WIN_TZ[Intl.DateTimeFormat().resolvedOptions().timeZone] ?? "UTC";
     const c = (name, pass, body) => `    <component name="${name}" processorArchitecture="arm64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n${body}\n    </component>`;
-    const lab = ["BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassCPUCheck", "BypassStorageCheck"]
-        .map((k, i) => `        <RunSynchronousCommand wcm:action="add"><Order>${i + 1}</Order><Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v ${k} /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>`).join("\n");
+    // Setup can't see the install CD until the virtio-scsi driver is loaded.
+    const drvload = `        <RunSynchronousCommand wcm:action="add"><Order>1</Order><Path>cmd /c for %d in (D E F G H I J) do @if exist %d:\\vioscsi\\w11\\ARM64\\vioscsi.inf drvload %d:\\vioscsi\\w11\\ARM64\\vioscsi.inf</Path></RunSynchronousCommand>`;
+    const lab = drvload + "\n" + ["BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassCPUCheck", "BypassStorageCheck"]
+        .map((k, i) => `        <RunSynchronousCommand wcm:action="add"><Order>${i + 2}</Order><Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v ${k} /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>`).join("\n");
     const part = (n, type, size, extend) =>
         `            <CreatePartition wcm:action="add"><Order>${n}</Order><Type>${type}</Type>${extend ? "<Extend>true</Extend>" : `<Size>${size}</Size>`}</CreatePartition>`;
     const first = `powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-PSDrive -PSProvider FileSystem | ForEach-Object { $p = Join-Path $_.Root 'firstlogon.ps1'; if (Test-Path $p) { & $p; break } }"`;
@@ -317,8 +342,18 @@ ${c("Microsoft-Windows-Shell-Setup", "oobeSystem", `      <OOBE>
 export function firstLogonScript(setupPort) {
     return `$ErrorActionPreference = 'Continue'
 Start-Transcript -Path C:\\Windows\\Temp\\dinghy-firstlogon.log -Force | Out-Null
-$g = Get-PSDrive -PSProvider FileSystem | ForEach-Object { Join-Path $_.Root 'virtio-win-guest-tools.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($g) { Write-Host "installing $g"; Start-Process $g -ArgumentList '/install','/quiet','/norestart' -Wait }
+# The virtio ISO: drivers (ARM64) and the guest agent. There is no ARM64 agent MSI; the x64 one runs
+# under Windows on ARM's emulation (it only talks to the ARM64 vioserial driver).
+$root = Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Root } | Where-Object { Test-Path (Join-Path $_ 'guest-agent\\qemu-ga-x86_64.msi') } | Select-Object -First 1
+if ($root) {
+    foreach ($d in 'NetKVM','vioserial','viostor','vioscsi','Balloon') {
+        Get-ChildItem (Join-Path $root "$d\\w11\\ARM64") -Filter *.inf -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "driver $($_.FullName)"; pnputil /add-driver $_.FullName /install | Out-Host }
+    }
+    Write-Host "installing the guest agent"
+    Start-Process msiexec.exe -ArgumentList '/i', (Join-Path $root 'guest-agent\\qemu-ga-x86_64.msi'), '/qn', '/norestart' -Wait
+    Start-Service QEMU-GA -ErrorAction SilentlyContinue
+} else { Write-Host "virtio ISO not found" }
 for ($i = 0; $i -lt 120; $i++) {
     try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('10.0.2.2', ${setupPort}); $c.Close(); break } catch { Start-Sleep 5 }
 }
@@ -327,10 +362,27 @@ Stop-Transcript | Out-Null
 `;
 }
 
+// Windows Setup automatically loads drivers from a "$WinPEDriver$" folder at the root of any media it
+// can read. Copy the few storage/network drivers it needs from the virtio ISO into one.
+function stageWinPEDrivers(virtioIso, dest) {
+    const att = spawnSync("hdiutil", ["attach", "-nobrowse", "-readonly", "-plist", virtioIso], { encoding: "utf8" });
+    const mount = (att.stdout.match(/<key>mount-point<\/key>\s*<string>([^<]+)<\/string>/) ?? [])[1];
+    if (!mount) throw new Error("Couldn't mount the virtio driver ISO.");
+    try {
+        for (const d of ["vioscsi", "viostor", "NetKVM", "vioserial"]) {
+            const src = path.join(mount, d, "w11", "ARM64");
+            if (!fs.existsSync(src)) continue;
+            fs.cpSync(src, path.join(dest, d), { recursive: true });
+        }
+    } finally { spawnSync("hdiutil", ["detach", mount, "-quiet"]); }
+}
+
 // Build the answer-file CD (autounattend.xml + firstlogon.ps1) with macOS's hdiutil.
-export function buildUnattendIso(cfg, { user, password, setupPort, imageIndex = 1 }) {
+export function buildUnattendIso(cfg, { user, password, setupPort, imageIndex = 1, virtioIso = null }) {
     const f = files(cfg);
     const stage = fs.mkdtempSync(path.join(os.tmpdir(), "dinghy-unattend-"));
+    // (No $WinPEDriver$ folder: Setup's own driver injection of those packages fails with 0x80070103;
+    //  the explicit drvload in autounattend.xml is enough to expose the install CD.)
     fs.writeFileSync(path.join(stage, "autounattend.xml"), unattendXml({ user, password, imageIndex }));
     fs.writeFileSync(path.join(stage, "firstlogon.ps1"), firstLogonScript(setupPort));
     fs.rmSync(f.unattend, { force: true });

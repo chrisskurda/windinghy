@@ -74,3 +74,19 @@ macOS Space under every RemoteApp window:
   and the internal NTP server is unreachable off the district network.
 - Fix: push the Mac's clock in through the guest agent (`Set-Date` as SYSTEM): before each
   launch, after wake, and via `dinghy fix clock`.
+
+## Installing Windows 11 ARM64 under QEMU/HVF (lessons)
+
+- **Install media speed matters.** A 5 GB Windows ISO attached as USB storage reads at ~1.4 MB/s
+  (emulated xHCI), which would make setup take hours. Attach it as a **virtio-scsi CD-ROM** instead
+  (~10x faster; Setup was at 21% in ~100 s). The firmware boots it natively; Windows Setup then needs
+  the `vioscsi` driver, which the answer file loads with `drvload` from the virtio ISO (kept on
+  USB: it's small).
+- The ARM64 UEFI firmware has **no AHCI/SATA driver**, so SATA CD-ROMs aren't an option.
+- Don't use a `$WinPEDriver$` folder or `DriverPaths` for this: Setup's own driver-injection step
+  fails (`CDlpActionDriverInstallation ... 0x80070103`, shown by Setup as
+  `0x80070103 - 0x40031`). Setup's logs are in `X:\$WINDOWS.~BT\Sources\Panther\setuperr.log`;
+  read them via Shift+F10 (QMP `send-key`; the Alt key's qcode is `alt`).
+- Stop sending the "press any key" space bar after ~12 s, or it presses buttons in Setup's UI.
+- virtio-win has ARM64 **drivers** but **no ARM64 guest-agent MSI**; install `qemu-ga-x86_64.msi`
+  (runs under Windows on ARM's x64 emulation) and the drivers via `pnputil`.

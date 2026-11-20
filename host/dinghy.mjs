@@ -1041,12 +1041,22 @@ async function waitForIsoDownload() {
 
 async function ensureVirtioIso() {
     const dest = path.join(VM.cacheDir(), "virtio-win.iso");
-    if (fs.existsSync(dest) && fs.statSync(dest).size > 3e8) return dest;
+    const part = dest + ".part";
+    const ok = () => fs.existsSync(dest) && fs.statSync(dest).size > 3e8;
+    if (ok()) return dest;
     fs.mkdirSync(VM.cacheDir(), { recursive: true });
+    const downloading = () => spawnSync("pgrep", ["-f", "curl.*virtio-win.iso.part"], { stdio: "ignore" }).status === 0;
+    if (downloading()) {
+        say("    The virtio driver ISO is still downloading; waiting for it...");
+        while (downloading()) await new Promise(r => setTimeout(r, 5000));
+    }
+    if (!ok() && fs.existsSync(part)) { try { fs.renameSync(part, dest); } catch {} }
+    if (ok()) return dest;
     say("Downloading the virtio driver ISO (~700 MB, one time)...");
-    const r = spawnSync("curl", ["-fL", "--retry", "3", "-o", dest + ".part", VIRTIO_URL], { stdio: "inherit" });
+    // -C - resumes a partial download
+    const r = spawnSync("curl", ["-fL", "-C", "-", "--retry", "3", "-o", part, VIRTIO_URL], { stdio: "inherit" });
     if (r.status !== 0) throw new Error("Couldn't download the virtio driver ISO.");
-    fs.renameSync(dest + ".part", dest);
+    fs.renameSync(part, dest);
     return dest;
 }
 
@@ -1082,12 +1092,14 @@ async function vmCreate(cfg, args) {
     const password = randomPassword();
     if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
     VM.createDisk(cfg, gb);
-    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT, imageIndex: edition.index });
+    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT, imageIndex: edition.index, virtioIso: virtio });
     const { server } = startSetupServer(cfg, "127.0.0.1", false, false, `http://10.0.2.2:${SETUP_PORT}`);
     try {
         VM.start(cfg, { windows: iso, unattend, virtio }, { ramMB, cpus });
         say("    VM started (headless). Pressing a key for the installer's boot prompt...");
-        for (let i = 0; i < 25; i++) { VM.sendKeys(cfg, ["spc"]); await new Promise(r => setTimeout(r, 1200)); }
+        await new Promise(r => setTimeout(r, 3000));
+        // The "press any key" prompt lasts only a few seconds; stop before Setup's own UI appears.
+        for (let i = 0; i < 12; i++) { VM.sendKeys(cfg, ["spc"]); await new Promise(r => setTimeout(r, 1000)); }
 
         stepSay("Installing Windows (unattended; usually 15-30 minutes)");
         const started = Date.now();

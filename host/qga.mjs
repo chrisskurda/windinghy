@@ -66,23 +66,25 @@ function readStdin() {
 async function qmpCall(execute, argsJson) {
     const s = await connect();
     let buf = "";
-    const next = () => new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("qmp timeout")), 15000);
-        const tryRead = () => {
-            let i;
-            while ((i = buf.indexOf("\n")) >= 0) {
-                const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-                if (!line) continue;
-                const o = JSON.parse(line);
-                if (o.event) continue; // asynchronous events are not replies
-                clearTimeout(t); resolve(o); return;
-            }
-        };
-        s.on("data", d => { buf += d.toString("utf8"); tryRead(); });
-        tryRead();
+    const queue = [];      // parsed replies waiting to be consumed
+    let waiting = null;    // resolver for the next reply
+    s.on("data", d => {    // ONE reader for the whole conversation
+        buf += d.toString("utf8");
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+            if (!line) continue;
+            let o; try { o = JSON.parse(line); } catch { continue; }
+            if (o.event) continue; // asynchronous events are not replies
+            if (waiting) { const w = waiting; waiting = null; w(o); } else queue.push(o);
+        }
     });
-    s.write(""); // greeting arrives unprompted
-    await next();
+    const next = () => new Promise((resolve, reject) => {
+        if (queue.length) return resolve(queue.shift());
+        const t = setTimeout(() => reject(new Error("qmp timeout")), 15000);
+        waiting = o => { clearTimeout(t); resolve(o); };
+    });
+    await next();                                   // greeting
     s.write(JSON.stringify({ execute: "qmp_capabilities" }) + "\n");
     await next();
     s.write(JSON.stringify({ execute, arguments: JSON.parse(argsJson || "{}") }) + "\n");
