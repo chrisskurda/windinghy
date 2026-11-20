@@ -95,6 +95,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var searchField: NSSearchField?
     var searchItem: NSMenuItem?
     var currentAppItems: [NSMenuItem] = []
+    var lastDiscover = Date.distantPast
+    var discovering = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -147,6 +149,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 }
             } else {
                 self.metricsLine = ""
+                self.rediscoverGuest()
+            }
+        }
+    }
+
+    // The VM's DHCP address can change: ask dinghy to find it again (by MAC, then a
+    // subnet scan). It rewrites config.json; the next poll picks the new host up.
+    func rediscoverGuest() {
+        guard !discovering, !syncing, !updating, setupProcess == nil,
+              Date().timeIntervalSince(lastDiscover) > 60,
+              let node = findNode(), let dinghy = findDinghy() else { return }
+        discovering = true
+        lastDiscover = Date()
+        DispatchQueue.global().async { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: node)
+            p.arguments = [dinghy, "discover", "--quiet"]
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            try? p.run()
+            p.waitUntilExit()
+            DispatchQueue.main.async {
+                self?.discovering = false
+                if p.terminationStatus == 0 { self?.poll() }
             }
         }
     }

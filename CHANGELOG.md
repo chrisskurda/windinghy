@@ -40,6 +40,12 @@ bumps may include breaking changes).
 - `dinghy` can be symlinked into a PATH directory (`ln -s ~/windinghy/dinghy
   ~/.local/bin/dinghy`); the wrapper resolves symlinks.
 
+- `dinghy discover` and automatic VM re-discovery: the VM is found again after a
+  DHCP change by its MAC address (live ARP table, then macOS's DHCP lease file,
+  verified against the guest ports), falling back to the bridge subnet scan.
+  The MAC and the UTM VM name are learned automatically. `status`, `sync`,
+  `doctor` and the menu-bar app (when the guest stops answering) now run it.
+
 ### Fixed
 
 - The native client exits about 3 seconds after an app's last window closes

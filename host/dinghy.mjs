@@ -8,6 +8,7 @@
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
 //                               (--no-banner or config suppressBanner=on: keep the Windows banner suppressed; opt-in, may violate network policy)
 //   dinghy status               guest health / version / metrics
+//   dinghy discover             find the VM again after its IP changed (by MAC, then subnet scan)
 //   dinghy sync                 fetch app list, (re)generate ~/Applications/WinDinghy/*.app
 //   dinghy launch <name>        launch a synced app
 //   dinghy desktop              open a full Windows desktop session
@@ -40,6 +41,7 @@ const DEFAULTS = {
     scale: "",
     promptcreds: "on",
     vmName: "Windows",
+    vmMac: "",           // learned automatically: the VM's MAC, used to find it when its IP changes
     filter: "on",
     client: "auto",      // auto | native | windows-app
     nativeBin: "",       // path to the patched sdl-freerdp (default: vendor/freerdp/bin)
@@ -361,7 +363,96 @@ async function guestAlive(cfg, timeoutMs = 2500) {
 
 // Scan vmnet bridge subnets (bridge100/101/...) for the guest API port.
 // Only ~254 candidates on host-only interfaces, checked in parallel: ~1-2s.
+// ---- finding the VM when its address changes ----
+// Identify the VM by MAC (stable across DHCP changes): live ARP table first, then
+// macOS's DHCP lease file; always verify the candidate before trusting it. Falls
+// back to probing the guest-server port across the vmnet bridge subnets.
+
+function normMac(m) {
+    return String(m).toLowerCase().split(":").map(x => x.padStart(2, "0")).join(":");
+}
+
+function arpTable() {
+    const r = spawnSync("arp", ["-an"], { encoding: "utf8" });
+    const out = [];
+    for (const line of (r.stdout || "").split("\n")) {
+        const m = line.match(/\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})/i);
+        if (m) out.push({ ip: m[1], mac: normMac(m[2]) });
+    }
+    return out;
+}
+
+function macForIp(ip) {
+    const find = () => arpTable().find(e => e.ip === ip)?.mac ?? null;
+    // ARP entries expire after ~20 minutes: poke the address once to refresh it.
+    return find() ?? (spawnSync("ping", ["-c", "1", "-t", "2", ip], { stdio: "ignore" }), find());
+}
+
+function leaseIpsForMac(mac) {
+    const hits = [];
+    try {
+        const txt = fs.readFileSync("/var/db/dhcpd_leases", "utf8");
+        for (const block of txt.split("}")) {
+            const ip = block.match(/ip_address=(\S+)/)?.[1];
+            const hw = block.match(/hw_address=\d+,(\S+)/)?.[1];
+            const lease = parseInt(block.match(/lease=(0x[0-9a-f]+)/i)?.[1] ?? "0", 16);
+            if (ip && hw && normMac(hw) === mac) hits.push({ ip, lease });
+        }
+    } catch {}
+    return hits.sort((x, y) => y.lease - x.lease).map(h => h.ip);
+}
+
+let discoverMethod = "";
+
+async function ipForMac(cfg, mac) {
+    const fromArp = arpTable().filter(e => e.mac === mac).map(e => e.ip);
+    const fromLease = leaseIpsForMac(mac);
+    for (const [how, ips] of [["MAC via ARP", fromArp], ["MAC via DHCP lease", fromLease]]) {
+        for (const ip of ips) {
+            if (await portOpen(ip, cfg.apiPort) || await portOpen(ip, cfg.rdpPort)) { discoverMethod = how; return ip; }
+        }
+    }
+    return null;
+}
+
+// UTM VMs known on this Mac: name + MAC addresses, read from their config.plist.
+function utmVms() {
+    const dirs = new Set();
+    const docs = path.join(os.homedir(), "Library/Containers/com.utmapp.UTM/Data/Documents");
+    const addFrom = d => { try { for (const f of fs.readdirSync(d)) if (f.endsWith(".utm")) dirs.add(path.join(d, f)); } catch {} };
+    addFrom(docs);
+    try { for (const v of fs.readdirSync("/Volumes")) addFrom(path.join("/Volumes", v)); } catch {}
+    const md = spawnSync("mdfind", ['kMDItemFSName == "*.utm"'], { encoding: "utf8", timeout: 5000 });
+    for (const p of (md.stdout || "").split("\n")) if (p.endsWith(".utm")) dirs.add(p);
+    const vms = [];
+    for (const d of dirs) {
+        const r = spawnSync("plutil", ["-convert", "json", "-o", "-", path.join(d, "config.plist")], { encoding: "utf8" });
+        if (r.status !== 0) continue;
+        try {
+            const j = JSON.parse(r.stdout);
+            const macs = (j.Network ?? []).map(n => n.MacAddress).filter(Boolean).map(normMac);
+            if (macs.length) vms.push({ name: j.Information?.Name ?? path.basename(d, ".utm"), path: d, macs });
+        } catch {}
+    }
+    return vms;
+}
+
+// Remember the guest's MAC (and which UTM VM it is) once it has been seen.
+function learnGuest(cfg, ip) {
+    const mac = macForIp(ip);
+    if (!mac) return;
+    let changed = false;
+    if (cfg.vmMac !== mac) { cfg.vmMac = mac; changed = true; }
+    const vm = utmVms().find(v => v.macs.includes(mac));
+    if (vm && cfg.vmName !== vm.name) { cfg.vmName = vm.name; changed = true; }
+    if (changed) saveConfig(cfg);
+}
+
 async function discoverGuest(cfg) {
+    if (cfg.vmMac) {
+        const ip = await ipForMac(cfg, normMac(cfg.vmMac));
+        if (ip) return ip;
+    }
     const subnets = [];
     for (const [ifname, addrs] of Object.entries(os.networkInterfaces())) {
         if (!ifname.startsWith("bridge")) continue;
@@ -379,7 +470,7 @@ async function discoverGuest(cfg) {
             } catch { return null; }
         }));
         const found = results.find(Boolean);
-        if (found) return found;
+        if (found) { discoverMethod = "subnet scan"; learnGuest(cfg, found); return found; }
     }
     return null;
 }
@@ -387,7 +478,10 @@ async function discoverGuest(cfg) {
 // Like guestAlive, but also re-discovers the VM when its address changed
 // (DHCP reassignment) and updates the saved config.
 async function findGuest(cfg, timeoutMs = 2500) {
-    if (await guestAlive(cfg, timeoutMs)) return true;
+    if (await guestAlive(cfg, timeoutMs)) {
+        if (!cfg.vmMac) learnGuest(cfg, cfg.host);
+        return true;
+    }
     const found = await discoverGuest(cfg);
     if (!found) return false;
     if (found !== cfg.host) {
@@ -729,6 +823,19 @@ async function cmdDoctor(cfg) {
     process.exit(allOk ? 0 : 1);
 }
 
+async function cmdDiscover(cfg, quiet) {
+    const before = cfg.host;
+    const ok = await findGuest(cfg, 2500);
+    if (!ok) {
+        if (!quiet) console.log("Couldn't find the Windows VM. Is it running? (Searched by MAC, then the UTM bridge subnet.)");
+        process.exit(1);
+    }
+    if (!quiet) {
+        console.log(`VM at ${cfg.host}${before !== cfg.host ? ` (was ${before}, found by ${discoverMethod || "scan"})` : ""}`);
+        if (cfg.vmMac) console.log(`MAC ${cfg.vmMac}${cfg.vmName ? `, UTM VM "${cfg.vmName}"` : ""}`);
+    }
+}
+
 async function cmdLaunch(cfg, name) {
     if (!name) throw new Error(`Usage: dinghy launch "<app name>"`);
     const entries = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")) : [];
@@ -879,12 +986,13 @@ const cfg = loadConfig();
 try {
     switch (cmd) {
         case "serve-setup": await cmdServeSetup(cfg, rest.includes("--json"), rest.includes("--no-banner")); break;
-        case "status":      await cmdStatus(cfg); break;
-        case "sync":        await cmdSync(cfg); break;
+        case "status":      await findGuest(cfg); await cmdStatus(cfg); break;
+        case "sync":        await findGuest(cfg); await cmdSync(cfg); break;
+        case "discover":    await cmdDiscover(cfg, rest.includes("--quiet")); break;
         case "launch":      await cmdLaunch(cfg, rest.join(" ")); break;
         case "desktop":     await cmdLaunch(cfg, "Windows Desktop"); break;
         case "open-rdp":    await cmdOpenRdp(cfg, rest[0]); break;
-        case "doctor":      await cmdDoctor(cfg); break;
+        case "doctor":      await findGuest(cfg); await cmdDoctor(cfg); break;
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
         case "update":      cmdUpdate(); break;
         case "login":       cmdLogin(cfg); break;
