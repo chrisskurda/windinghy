@@ -1,6 +1,7 @@
 // WinDinghy menu-bar app: ambient VM status + app picker + sync + setup check.
 // Built by build.sh into ~/Applications/WinDinghy.app (LSUIElement, no dock icon).
 import AppKit
+import SwiftUI
 import ServiceManagement
 
 // ---------- config (shared with dinghy) ----------
@@ -204,7 +205,7 @@ final class RunWindow: NSObject, NSWindowDelegate {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFieldDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFieldDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     let menu = NSMenu()
     var cfg = WBConfig.load()
@@ -339,6 +340,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         return item
     }
 
+    // ---------- main window (SwiftUI) ----------
+
+    var mainWindow: NSWindow?
+
+    @objc func activateRunningApp(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        NSWorkspace.shared.runningApplications
+            .first { $0.bundleURL?.deletingPathExtension().lastPathComponent == name && ($0.bundleURL?.path.hasPrefix(cfg.appsDir) ?? false) }?
+            .activate(options: [.activateAllWindows])
+    }
+
+    @objc func openMainWindow() {
+        AppStore.shared.delegate = self
+        if mainWindow == nil {
+            let host = NSHostingController(rootView: MainView().environmentObject(AppStore.shared))
+            let w = NSWindow(contentViewController: host)
+            w.title = "WinDinghy"
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            w.setContentSize(NSSize(width: 1060, height: 700))
+            w.minSize = NSSize(width: 900, height: 600)
+            w.isReleasedWhenClosed = false
+            w.delegate = self
+            w.setFrameAutosaveName("WinDinghyMain")
+            w.center()
+            mainWindow = w
+        }
+        // A window needs a Dock icon and Cmd-Tab entry while it is open; back to a menu-bar-only app after.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        mainWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func setMenubarIcon(_ choice: String) {
+        WBConfig.update("menubarIcon", choice)
+        cfg = WBConfig.load()
+        applyMenubarIcon()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openMainWindow()
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if (notification.object as? NSWindow) === mainWindow {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
     // The menu-bar glyph: the WinDinghy dinghy (a template image, so macOS tints it for light/dark),
     // or the original window symbol. Chosen from the menu, stored as "menubarIcon" in config.json.
     func applyMenubarIcon() {
@@ -384,6 +434,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyMenubarIcon()
+        AppStore.shared.delegate = self
+        if CommandLine.arguments.contains("--show-window") || ProcessInfo.processInfo.environment["WINDINGHY_SHOW_WINDOW"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.openMainWindow() }
+        }
         menu.delegate = self
         statusItem.menu = menu
         poll()
@@ -513,7 +567,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // down. Window count appended only when RemoteApp windows are open.
     func updateBadge() {
         guard let btn = statusItem.button else { return }
-        let count = remoteAppWindows().count
+        let count = AppStore.shared.runningAppNames(cfg).count
         let text = count > 0 ? " ●\u{2009}\(count)" : " ●"
         let attr = NSMutableAttributedString(string: text)
         let full = NSRange(location: 0, length: attr.length)
@@ -587,35 +641,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         searchField?.stringValue = ""
     }
 
+    // The dropdown is for quick actions; everything else lives in the WinDinghy window (Open WinDinghy…).
     func rebuildMenu() {
         menu.removeAllItems()
 
-        let status = NSMenuItem(title: online ? "Windows VM · online" : "Windows VM · offline", action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: online ? "Windows is running" : "Windows is off", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
         if online && !metricsLine.isEmpty {
             let m = NSMenuItem(title: metricsLine, action: nil, keyEquivalent: "")
             m.isEnabled = false
             menu.addItem(m)
+        } else if !online {
+            let hint = NSMenuItem(title: "Starts when you open an app", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            menu.addItem(hint)
         }
         menu.addItem(.separator())
 
-        let running = remoteAppWindows()
+        // Running apps (the native client runs each as its own process); click to bring forward.
+        let running = AppStore.shared.runningAppNames(cfg).sorted()
         if !running.isEmpty {
             let header = NSMenuItem(title: "Running (\(running.count))", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            let titlesVisible = running.contains { !$0.isEmpty }
-            if titlesVisible {
-                for title in running where !title.isEmpty {
-                    let item = NSMenuItem(title: "  " + title, action: #selector(focusWindowsApp), keyEquivalent: "")
-                    item.target = self
-                    menu.addItem(item)
-                }
-            } else {
-                let hint = NSMenuItem(title: "  (grant Screen Recording to see titles)", action: nil, keyEquivalent: "")
-                hint.isEnabled = false
-                menu.addItem(hint)
+            for name in running {
+                let item = NSMenuItem(title: "  " + name, action: #selector(activateRunningApp(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = name
+                menu.addItem(item)
             }
             menu.addItem(.separator())
         }
@@ -628,33 +682,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         if online {
             menu.addItem(makeItem("Open Windows Desktop", #selector(openDesktop), "d"))
             menu.addItem(makeItem(syncing ? "Syncing…" : "Sync Apps Now", #selector(runSync), "s", enabled: !syncing))
-            menu.addItem(makeItem("Restart Windows VM", #selector(restartVM), ""))
         } else {
-            menu.addItem(makeItem("Start Windows VM", #selector(startVM), "b"))
-            // First run / unreachable guest: hands-free setup and repair
-            menu.addItem(setupMenuItem())
-            menu.addItem(makeItem("Fix Problems…", #selector(showFix), ""))
+            menu.addItem(makeItem("Start Windows", #selector(startVM), "b"))
         }
         menu.addItem(.separator())
-
-        let userTitle = cfg.username.isEmpty ? "Set Windows Username…" : "Windows Username: \(cfg.username)…"
-        menu.addItem(makeItem(userTitle, #selector(setUsername), ""))
-        let promptItem = makeItem("Ask for Password on Launch", #selector(togglePromptCreds), "")
-        promptItem.state = cfg.promptcreds != "off" ? .on : .off
-        menu.addItem(promptItem)
-        menu.addItem(makeItem("Setup Check…", #selector(setupCheck), ""))
-        if online {
-            menu.addItem(setupMenuItem())
-            menu.addItem(makeItem("Fix Problems…", #selector(showFix), ""))
-        }
-        menu.addItem(makeItem(updating ? "Checking for Updates…" : "Check for Updates…", #selector(checkForUpdates), "", enabled: !updating))
-        if cfg.vmBackend == "qemu" { menu.addItem(vmToolsMenuItem()) }
-        menu.addItem(menubarIconMenuItem())
-        menu.addItem(advancedMenuItem())
-        let login = makeItem("Start at Login", #selector(toggleLogin), "")
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(login)
-        menu.addItem(makeItem("Open Apps Folder", #selector(openFolder), ""))
+        menu.addItem(makeItem("Open WinDinghy…", #selector(openMainWindow), "o"))
         let quit = NSMenuItem(title: "Quit WinDinghy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)

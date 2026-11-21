@@ -106,6 +106,20 @@ bumps may include breaking changes).
   an **Advanced Mode** toggle, and a **Menu Bar Icon** choice (the new dinghy glyph, or the original
   window symbol). The new app icon and glyph are in `host/menubar` (`make-icon.sh` rebuilds the .icns).
 
+- **The WinDinghy window** (menu bar > Open WinDinghy…, or click the Dock icon): a native SwiftUI window
+  built from the design handoff (`docs/design/main-window`). Sidebar with a live status card; **Apps**
+  (grid with the real app icons, search, Sync, running apps highlighted); **Windows** (start/stop/restart,
+  CPU/memory/disk, health, open desktop); **Resources** (cores, memory, disk for the managed VM; applied
+  at the next start, and the Windows partition is extended after a disk grows); **Sharing** (clipboard,
+  home folder, printers, audio, extra folders, applied at the next app launch); **Snapshots**;
+  **General** (account, start at login, menu bar icon, setup check, fix problems, updates, advanced
+  mode); and a **first-run setup** flow wired to `dinghy vm create` with a progress bar.
+- The menu-bar menu is now just quick actions: status, running apps, search, favorites and apps, Open
+  Windows Desktop, Sync, Start Windows, Open WinDinghy…, Quit. Everything else moved into the window.
+- Shared folders appear in Windows as `\\tsclient\<name>`. FreeRDP's drive redirection has no
+  read-only mode, so shares are read/write. Printer sharing needs the client built with CUPS (now on).
+- `dinghy vm create --progress` prints `PROGRESS:<pct>:<phase>` lines; `dinghy vm snapshots --json`.
+
 ### Fixed
 
 - Stopping the managed VM now asks Windows to shut down through the guest agent (the ACPI power-button

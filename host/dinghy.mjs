@@ -49,6 +49,14 @@ const DEFAULTS = {
     scale: "",
     promptcreds: "on",
     vmName: "Windows",
+    vmCpus: 4,           // managed VM resources (applied the next time it starts)
+    vmRamGB: 6,
+    vmDiskGB: 64,
+    shareClipboard: "on",  // what Windows apps may reach on this Mac (applied at the next app launch)
+    shareHome: "on",
+    sharePrinters: "off",
+    shareAudio: "on",
+    sharedFolders: [],
     advanced: "off",     // on: unlock unsupported setups (UTM or another hypervisor, remote hosts, custom clients)
     vmBackend: "utm",    // utm (a VM you run in UTM) or qemu (the VM WinDinghy manages: dinghy vm create)
     vmDir: "",           // where the managed VM lives (default ~/Library/Application Support/WinDinghy/vm)
@@ -716,7 +724,16 @@ function nativeBannerAccepted(b) {
 function nativeArgs(cfg, meta, pw) {
     const a = [`/v:${cfg.host}`, `/port:${cfg.rdpPort}`];
     if (cfg.username) a.push(`/u:${winUser(cfg)}`);
-    a.push(`/p:${pw}`, "/cert:ignore", `/scale-desktop:${cfg.scale || 100}`, "/scale-device:100", "+clipboard", "/gfx", "/log-level:WARN");
+    a.push(`/p:${pw}`, "/cert:ignore", `/scale-desktop:${cfg.scale || 100}`, "/scale-device:100", "/gfx", "/log-level:WARN");
+    // Sharing with the Mac (Preferences > Sharing). Folders appear in Windows as \\tsclient\<name>.
+    if (cfg.shareClipboard !== "off") a.push("+clipboard");
+    if (cfg.shareAudio !== "off") a.push("/sound");
+    if (cfg.sharePrinters === "on") a.push("/printer");
+    const drive = (name, p) => a.push(`/drive:${String(name).replace(/[,\/\\:]/g, "_") || "Share"},${p}`);
+    if (cfg.shareHome !== "off") drive("Home", os.homedir());
+    for (const f of Array.isArray(cfg.sharedFolders) ? cfg.sharedFolders : []) {
+        if (typeof f === "string" && fs.existsSync(f)) drive(path.basename(f), f);
+    }
     if (cfg.nativeDebug === "on") a.push("/log-filters:com.freerdp.client.sdl.rail:DEBUG,com.freerdp.channels.rail.client:DEBUG");
     if (meta.desktop) {
         a.push("/size:1440x900", "/dynamic-resolution");
@@ -1221,6 +1238,9 @@ async function guestApiUp(cfg) {
 
 async function vmCreate(cfg, args) {
     const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
+    // The app window reads these lines to draw its progress bar.
+    const progress = (pct, title) => { if (args.includes("--progress")) console.log(`PROGRESS:${Math.round(pct)}:${title}`); };
+    progress(2, "Preparing…");
     const gb = Number(opt("--disk", 40)), ramMB = Number(opt("--ram", 4096)), cpus = Number(opt("--cpus", 4));
     if (VM.exists(cfg)) throw new Error("A WinDinghy VM already exists. Use: dinghy vm start   (or dinghy vm destroy --yes to start over)");
 
@@ -1231,9 +1251,11 @@ async function vmCreate(cfg, args) {
         if (r.status !== 0 || !VM.tools().ok) throw new Error("Couldn't install QEMU. Install Homebrew (https://brew.sh) and run: brew install qemu");
     }
 
+    progress(5, "Preparing…");
     stepSay("Windows installation media");
     let iso = opt("--iso", null) ?? findWindowsIso();
-    if (!iso) iso = await waitForIsoDownload();
+    if (!iso) { progress(6, "Waiting for the Windows installer…"); iso = await waitForIsoDownload(); }
+    progress(10, "Preparing Windows…");
     if (!fs.existsSync(iso)) throw new Error(`ISO not found: ${iso}`);
     say(`    ${iso}`);
     const editions = VM.isoEditions(iso);
@@ -1246,6 +1268,8 @@ async function vmCreate(cfg, args) {
     const user = "WinDinghy";
     const password = randomPassword();
     if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
+    cfg.vmCpus = cpus; cfg.vmRamGB = Math.max(1, Math.round(ramMB / 1024)); cfg.vmDiskGB = gb;
+    saveConfig(cfg);
     VM.createDisk(cfg, gb);
     const productKey = opt("--key", null) ?? VM.genericKey(edition);
     if (productKey) say(`    product key: ${opt("--key", null) ? "yours" : "Microsoft's generic install key (installs unactivated)"}`);
@@ -1264,6 +1288,7 @@ async function vmCreate(cfg, args) {
         for (;;) {
             await new Promise(r => setTimeout(r, 15000));
             const mins = Math.round((Date.now() - started) / 60000);
+            progress(20 + Math.min(60, ((Date.now() - started) / 60000) * 9), "Installing Windows…");
             if (await guestApiUp(cfg)) { say(`    guest server is up after ${mins} min`); break; }
             if (!VM.isRunning(cfg)) throw new Error(`The VM stopped during installation. Log: ${VM.files(cfg).log}`);
             if (Date.now() - lastShot > 120000) { VM.screenshot(cfg); lastShot = Date.now(); say(`    ...${mins} min (progress screenshot: dinghy vm screenshot)`); }
@@ -1273,6 +1298,7 @@ async function vmCreate(cfg, args) {
         server.close();
     }
 
+    progress(85, "Adding your apps…");
     stepSay("Finishing up");
     cfg.vmName = VM.VM_NAME;
     switchBackend(cfg, "qemu", { host: "127.0.0.1", rdpPort: VM.RDP_PORT, apiPort: VM.API_PORT, username: user, vmName: VM.VM_NAME, vmMac: "" });
@@ -1284,9 +1310,18 @@ async function vmCreate(cfg, args) {
     VM.start(cfg, {}, { ramMB, cpus });
     if (!await waitFor(() => guestApiUp(cfg), 300, 5000)) throw new Error("The VM didn't come back after the restart. Try: dinghy vm start");
 
+    progress(94, "Adding your apps…");
     stepSay("Syncing your Windows apps");
     await cmdSync(cfg);
+    progress(100, "Done");
     say(`\nDone. Your WinDinghy VM runs without UTM (disk: ${VM.files(cfg).disk}).`);
+}
+
+// After the virtual disk grew (Preferences > Resources), Windows still has the old partition: extend it.
+async function extendWindowsPartition(cfg) {
+    if (G.backendKind() !== "qemu" || !VM.needsExtend(cfg)) return;
+    const r = await G.psAsync(VM.VM_NAME, "$max=(Get-PartitionSupportedSize -DriveLetter C).SizeMax; Resize-Partition -DriveLetter C -Size $max -ErrorAction Stop; 'extended'", { timeout: 120000 });
+    if (/extended/.test(r.output)) VM.clearNeedsExtend(cfg);
 }
 
 async function cmdVm(cfg, args) {
@@ -1298,6 +1333,7 @@ async function cmdVm(cfg, args) {
             VM.start(cfg);
             say("Starting...");
             if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("The VM started but the guest server didn't answer in 5 minutes.");
+            await extendWindowsPartition(cfg);
             say("Online.");
             return;
         }
@@ -1331,6 +1367,7 @@ async function cmdVm(cfg, args) {
         }
         case "snapshots": {
             const list = VM.snapshotList(cfg);
+            if (args.includes("--json")) { console.log(JSON.stringify(list.map(x => ({ name: x.name, date: x.date })))); return; }
             if (!list.length) { say("No snapshots yet. Take one with: dinghy vm snapshot [name]"); return; }
             for (const x of list) say(`${x.name.padEnd(24)} ${new Date(x.date).toLocaleString()}`);
             return;

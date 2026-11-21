@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet><meta name="design_doc_mode" content="canvas"><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif}a{color:#0f6be0}a:hover{color:#083e9e}input[type=range]{accent-color:#0f6be0}</style></helmet>
+<div style="{{ rootStyle }}">
+<div style="width:1180px;height:820px;position:relative;background:linear-gradient(160deg,#4fb4ff 0%,#0f6be0 45%,#04235f 100%);border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+ <div style="height:28px;background:rgba(255,255,255,.18);backdrop-filter:blur(20px);display:flex;align-items:center;padding:0 14px;gap:16px;font-size:13px;color:#fff;font-weight:500">
+  <span>WinDinghy</span><span style="font-weight:400;opacity:.9">File</span><span style="font-weight:400;opacity:.9">View</span><span style="font-weight:400;opacity:.9">Window</span><span style="flex:1"></span>
+  <div onClick="{{ toggleMenu }}" style="display:flex;align-items:center;gap:5px;padding:2px 8px;border-radius:5px;background:{{ menuBtnBg }};cursor:pointer"><span style="width:8px;height:8px;border-radius:50%;background:{{ vmDot }}"></span><span style="font-size:12px">{{ runningCount }}</span></div>
+  <span style="font-weight:400;font-size:12px">Fri 9:41</span>
+ </div>
+ <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+ <div style="position:absolute;top:32px;right:40px;width:300px;z-index:30;background:var(--menu);backdrop-filter:blur(30px);border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.35),0 0 0 .5px rgba(0,0,0,.3);padding:6px;font-size:13px;color:var(--text)">
+  <div style="padding:6px 10px;color:var(--sub);display:flex;flex-direction:column;gap:3px"><div>{{ vmLabel }}</div><div>{{ vmSub }}</div></div>
+  <div style="height:1px;background:var(--line);margin:4px 6px"></div>
+  <div style="margin:4px 6px;padding:5px 10px;border-radius:8px;background:var(--card);color:var(--sub)">⌕ Search Windows apps</div>
+  <sc-if value="{{ hasRunning }}"><div><div style="padding:4px 10px;color:var(--sub)">Running</div>
+  <sc-for list="{{ runningApps }}" as="a" hint-placeholder-count="2"><div onClick="{{ a.stop }}" style="padding:5px 10px;border-radius:5px;display:flex;align-items:center;gap:8px;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="{{ a.icon }}">{{ a.letter }}</span><span style="flex:1">{{ a.name }}</span><span style="font-size:11px;opacity:.7">Quit</span></div></sc-for></div></sc-if>
+  <div style="padding:4px 10px;color:var(--sub)">Favorites</div>
+  <div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Microsoft Edge</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Character Map</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Notepad</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Paint</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Control Panel</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">All Apps</span><span style="opacity:.55">›</span></div>
+  <div style="height:1px;background:var(--line);margin:4px 6px"></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Open Windows Desktop</span><span style="opacity:.55">⌘D</span></div><div onClick="{{ syncNow }}" style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">{{ syncLabel }}</span><span style="opacity:.55">⌘S</span></div><div onClick="{{ toggleVm }}" style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">{{ restartLabel }}</span><span style="opacity:.55"></span></div>
+  <div style="height:1px;background:var(--line);margin:4px 6px"></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Windows Username: WinDinghy…</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px">✓</span>Ask for Password on Launch</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px"></span>Setup Check…</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px"></span>Set Up Windows VM…</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px"></span>Fix Problems…</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px"></span>Check for Updates…</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Windows VM</span><span style="opacity:.55">›</span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Menu Bar Icon</span><span style="opacity:.55">›</span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px"></span>Advanced Mode</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px">✓</span>Start at Login</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1"><span style="display:inline-block;width:16px;margin-left:-4px"></span>Open Apps Folder</span><span style="opacity:.55"></span></div><div  style="padding:5px 10px;border-radius:5px;display:flex;cursor:pointer" style-hover="background:#0f6be0;color:#fff"><span style="flex:1">Quit WinDinghy</span><span style="opacity:.55">⌘Q</span></div>
+ </div>
+ </sc-if>
+
+ <div style="position:absolute;left:60px;top:70px;width:1060px;height:700px;background:var(--bg);border-radius:12px;box-shadow:0 22px 70px rgba(0,0,0,.45),0 0 0 .5px rgba(0,0,0,.4);display:flex;overflow:hidden;color:var(--text);font-size:13px">
+  <div style="width:210px;background:var(--side);backdrop-filter:blur(30px);padding:14px 10px;display:flex;flex-direction:column;gap:2px;border-right:1px solid var(--line);flex:none">
+   <div style="display:flex;gap:8px;padding:0 6px 16px"><span style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></span><span style="width:12px;height:12px;border-radius:50%;background:#febc2e"></span><span style="width:12px;height:12px;border-radius:50%;background:#28c840"></span></div>
+   <sc-for list="{{ nav }}" as="n" hint-placeholder-count="5"><div onClick="{{ n.go }}" style="{{ n.style }}"><span style="width:16px;text-align:center;font-size:14px">{{ n.glyph }}</span>{{ n.label }}</div></sc-for>
+   <div style="flex:1"></div>
+   <div style="padding:10px;border-radius:8px;background:var(--card);display:flex;flex-direction:column;gap:6px;font-size:12px">
+    <div style="display:flex;align-items:center;gap:6px;font-weight:600"><span style="width:8px;height:8px;border-radius:50%;background:{{ vmDot }}"></span>{{ vmLabel }}</div>
+    <div style="color:var(--sub)">{{ vmSub }}</div>
+   </div>
+   <div onClick="{{ toggleTheme }}" style="padding:8px 10px;color:var(--sub);cursor:pointer;font-size:12px">Appearance: {{ themeName }}</div>
+  </div>
+
+  <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+   <div style="height:52px;display:flex;align-items:center;padding:0 24px;gap:12px;border-bottom:1px solid var(--line);flex:none"><div style="font-size:15px;font-weight:600;flex:1">{{ title }}</div>
+    <sc-if value="{{ isApps }}"><input value="{{ query }}" onInput="{{ setQuery }}" placeholder="Search apps" style="width:200px;padding:5px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:13px;outline:none"></input><div onClick="{{ syncNow }}" style="padding:5px 12px;border-radius:6px;background:var(--card);border:1px solid var(--line);cursor:pointer">{{ syncLabel }}</div></sc-if>
+   </div>
+   <div style="flex:1;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:18px">
+
+    <sc-if value="{{ isApps }}"><div style="display:flex;flex-direction:column;gap:14px">
+     <div style="color:var(--sub)">{{ appsHint }}</div>
+     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:16px">
+      <sc-for list="{{ apps }}" as="a" hint-placeholder-count="6"><div onClick="{{ a.open }}" style="padding:14px 6px 10px;border-radius:10px;display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;position:relative;background:{{ a.bg }}" style-hover="background:var(--card)"><span style="{{ a.icon }}">{{ a.letter }}</span><div style="font-weight:500;text-align:center">{{ a.name }}</div><div style="font-size:11px;color:var(--sub)">{{ a.status }}</div></div></sc-for>
+     </div>
+     <div style="font-size:12px;color:var(--sub);border-top:1px solid var(--line);padding-top:12px">Each app is a real .app in ~/Applications/WinDinghy, available from Spotlight and Finder. Opening one starts the VM if needed.</div>
+    </div></sc-if>
+
+    <sc-if value="{{ isMachine }}"><div style="display:flex;flex-direction:column;gap:18px">
+     <div style="background:var(--card);border-radius:10px;padding:18px;display:flex;align-items:center;gap:16px">
+      <img src="assets/icon.svg" style="width:64px;height:64px;margin:-8px"></img>
+      <div style="flex:1"><div style="font-size:16px;font-weight:600">Windows 11 Pro</div><div style="color:var(--sub)">ARM64 · {{ vmSub }}</div></div>
+      <div onClick="{{ toggleVm }}" style="padding:7px 16px;border-radius:7px;background:#0f6be0;color:#fff;font-weight:500;cursor:pointer">{{ vmAction }}</div>
+     </div>
+     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+      <sc-for list="{{ meters }}" as="m" hint-placeholder-count="3"><div style="background:var(--card);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px"><div style="color:var(--sub);font-size:12px">{{ m.label }}</div><div style="font-size:22px;font-weight:600">{{ m.value }}</div><div style="height:6px;border-radius:3px;background:var(--line)"><div style="{{ m.bar }}"></div></div></div></sc-for>
+     </div>
+     <div style="background:var(--card);border-radius:10px;padding:4px 16px">
+      <sc-for list="{{ health }}" as="h" hint-placeholder-count="4"><div style="display:flex;align-items:center;padding:11px 0;border-bottom:1px solid var(--line);gap:10px"><span style="flex:1">{{ h.label }}</span><span style="color:var(--sub);font-family:ui-monospace,Menlo,monospace;font-size:12px">{{ h.detail }}</span><span style="width:8px;height:8px;border-radius:50%;background:{{ h.dot }}"></span></div></sc-for>
+     </div>
+     <div style="background:var(--card);border-radius:10px;padding:14px 16px;display:flex;align-items:center;gap:12px"><div style="flex:1"><div style="font-weight:500">Show Windows desktop</div><div style="color:var(--sub);font-size:12px">Opens a full desktop session. Apps normally run without it.</div></div><div style="padding:6px 14px;border-radius:7px;border:1px solid var(--line);cursor:pointer">Open Desktop</div></div>
+    </div></sc-if>
+
+    <sc-if value="{{ isResources }}"><div style="display:flex;flex-direction:column;gap:16px;max-width:620px">
+     <div style="background:var(--card);border-radius:10px;padding:6px 18px">
+      <sc-for list="{{ sliders }}" as="s" hint-placeholder-count="3"><div style="padding:14px 0;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:8px"><div style="display:flex"><span style="flex:1;font-weight:500">{{ s.label }}</span><span style="font-variant-numeric:tabular-nums">{{ s.text }}</span></div><input type="range" min="{{ s.min }}" max="{{ s.max }}" step="{{ s.step }}" value="{{ s.val }}" onInput="{{ s.set }}" style="width:100%"></input><div style="font-size:12px;color:var(--sub)">{{ s.note }}</div></div></sc-for>
+     </div>
+     <div style="color:var(--sub);font-size:12px">Resource changes apply the next time the Windows machine starts.</div>
+     <div onClick="{{ toggleAdv }}" style="cursor:pointer;font-weight:500;color:#0f6be0">{{ advLabel }}</div>
+     <sc-if value="{{ advOpen }}"><div style="background:var(--card);border-radius:10px;padding:6px 18px">
+      <sc-for list="{{ advanced }}" as="d" hint-placeholder-count="4"><div style="display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--line);gap:10px"><span style="flex:1">{{ d.label }}</span><span style="font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--sub)">{{ d.value }}</span></div></sc-for>
+     </div></sc-if>
+    </div></sc-if>
+
+    <sc-if value="{{ isSharing }}"><div style="display:flex;flex-direction:column;gap:16px;max-width:660px">
+     <div style="background:var(--card);border-radius:10px;padding:6px 18px">
+      <sc-for list="{{ shares }}" as="s" hint-placeholder-count="3"><div style="display:flex;align-items:center;padding:13px 0;border-bottom:1px solid var(--line);gap:12px"><div style="flex:1"><div style="font-weight:500">{{ s.label }}</div><div style="font-size:12px;color:var(--sub)">{{ s.note }}</div></div><div onClick="{{ s.flip }}" style="{{ s.track }}"><div style="{{ s.knob }}"></div></div></div></sc-for>
+     </div>
+     <div style="font-weight:600">Shared folders</div>
+     <div style="background:var(--card);border-radius:10px;padding:4px 18px">
+      <sc-for list="{{ folders }}" as="f" hint-placeholder-count="3"><div style="display:flex;align-items:center;padding:11px 0;border-bottom:1px solid var(--line);gap:10px"><span style="flex:1;font-family:ui-monospace,Menlo,monospace;font-size:12px">{{ f.mac }}</span><span style="color:var(--sub)">→</span><span style="width:70px;font-family:ui-monospace,Menlo,monospace;font-size:12px">{{ f.win }}</span><span style="width:70px;color:var(--sub);text-align:right">{{ f.mode }}</span></div></sc-for>
+      <div style="padding:11px 0;color:#0f6be0;cursor:pointer">+ Add Folder…</div>
+     </div>
+    </div></sc-if>
+
+    <sc-if value="{{ isSnaps }}"><div style="display:flex;flex-direction:column;gap:16px;max-width:660px">
+     <div style="display:flex;align-items:center;gap:12px"><div style="flex:1;color:var(--sub)">Rewind Windows to an earlier state. Your Mac files are not affected.</div><div onClick="{{ takeSnap }}" style="padding:7px 14px;border-radius:7px;background:#0f6be0;color:#fff;font-weight:500;cursor:pointer">Take Snapshot</div></div>
+     <div style="background:var(--card);border-radius:10px;padding:4px 18px">
+      <sc-for list="{{ snaps }}" as="s" hint-placeholder-count="3"><div style="display:flex;align-items:center;padding:13px 0;border-bottom:1px solid var(--line);gap:12px"><div style="flex:1"><div style="font-weight:500">{{ s.name }}</div><div style="font-size:12px;color:var(--sub)">{{ s.meta }}</div></div><div onClick="{{ s.restore }}" style="padding:5px 12px;border-radius:6px;border:1px solid var(--line);cursor:pointer">{{ s.btn }}</div></div></sc-for>
+     </div>
+    </div></sc-if>
+
+   </div>
+  </div>
+
+  <sc-if value="{{ wizOpen }}"><div style="position:absolute;inset:0;background:var(--bg);z-index:20;display:flex;align-items:center;justify-content:center">
+   <div style="width:500px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center">
+    <img src="assets/icon.svg" style="width:120px;height:120px;margin:-16px"></img>
+    <sc-if value="{{ wizWelcome }}"><div style="display:flex;flex-direction:column;align-items:center;gap:14px"><div style="font-size:26px;font-weight:700">Windows apps on your Mac</div><div style="color:var(--sub);font-size:15px;line-height:1.5">WinDinghy sets up Windows in the background. Your Windows apps appear in the Dock, Spotlight and Finder like any other Mac app.</div>
+     <div onClick="{{ wizStart }}" style="margin-top:8px;padding:10px 28px;border-radius:8px;background:#0f6be0;color:#fff;font-weight:600;font-size:15px;cursor:pointer">Set Up Windows</div>
+     <div onClick="{{ wizCustom }}" style="color:#0f6be0;cursor:pointer">Customize…</div><div style="font-size:12px;color:var(--sub)">Downloads about 5 GB. Needs 64 GB free disk space.</div></div></sc-if>
+    <sc-if value="{{ wizCustomStep }}"><div style="display:flex;flex-direction:column;gap:14px;width:100%;text-align:left"><div style="font-size:22px;font-weight:700;text-align:center">Customize</div>
+     <div style="background:var(--card);border-radius:10px;padding:4px 16px">
+      <sc-for list="{{ wizOpts }}" as="o" hint-placeholder-count="4"><div style="display:flex;padding:11px 0;border-bottom:1px solid var(--line)"><span style="flex:1">{{ o.label }}</span><span style="color:var(--sub)">{{ o.value }}</span></div></sc-for>
+     </div>
+     <div style="display:flex;gap:10px;justify-content:center"><div onClick="{{ wizBack }}" style="padding:9px 20px;border-radius:8px;border:1px solid var(--line);cursor:pointer">Back</div><div onClick="{{ wizStart }}" style="padding:9px 24px;border-radius:8px;background:#0f6be0;color:#fff;font-weight:600;cursor:pointer">Install</div></div></div></sc-if>
+    <sc-if value="{{ wizInstall }}"><div style="display:flex;flex-direction:column;gap:12px;width:100%"><div style="font-size:22px;font-weight:700">{{ wizPhase }}</div><div style="height:8px;border-radius:4px;background:var(--line);overflow:hidden"><div style="{{ wizBar }}"></div></div><div style="color:var(--sub);font-size:12px">{{ wizPct }}% · about 6 minutes in total. You can keep using your Mac.</div></div></sc-if>
+    <sc-if value="{{ wizDone }}"><div style="display:flex;flex-direction:column;align-items:center;gap:12px"><div style="font-size:24px;font-weight:700">Windows is ready</div><div style="color:var(--sub);font-size:15px">6 apps were added to ~/Applications/WinDinghy.</div><div onClick="{{ wizFinish }}" style="margin-top:6px;padding:10px 28px;border-radius:8px;background:#0f6be0;color:#fff;font-weight:600;cursor:pointer">Show My Apps</div><div style="font-size:12px;color:var(--sub)">The first launch asks for your Windows password once. It is saved to Keychain.</div></div></sc-if>
+   </div>
+  </div></sc-if>
+ </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;dark&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Appearance&quot;}}">
+class Component extends DCLogic {
+  state = { dark: false, screen: 'apps', menuOpen: false, wiz: 'welcome', pct: 0, vmOn: true, query: '', syncing: false, advOpen: false,
+    run: { Excel: true, Word: false, Outlook: true, 'Visual Studio': false, 'Notepad++': false, 'Paint.NET': false },
+    cpu: 4, ram: 8, disk: 64,
+    sh: { clip: true, home: true, printers: false, audio: true },
+    snaps: [{ name: 'Clean install', meta: 'Nov 18 · 9.1 GB' }, { name: 'Before Office update', meta: 'Nov 19 · 11.4 GB' }],
+    restored: null };
+  componentDidMount() { this.t = setInterval(() => { if (this.state.wiz === 'install') { const p = this.state.pct + 2; this.setState(p >= 100 ? { pct: 100, wiz: 'done' } : { pct: p }); } }, 120); }
+  componentWillUnmount() { clearInterval(this.t); }
+  renderVals() {
+    const s = this.state, set = (o) => () => this.setState(o), dark = this.props.dark ?? s.dark;
+    const vars = dark ? '--bg:#1e1e20;--side:rgba(44,44,46,.85);--card:rgba(255,255,255,.07);--line:rgba(255,255,255,.12);--text:#f2f2f4;--sub:#9a9aa2;--menu:rgba(40,40,42,.92)' : '--bg:#fff;--side:rgba(238,238,242,.9);--card:#f3f3f6;--line:rgba(0,0,0,.1);--text:#1d1d1f;--sub:#6e6e73;--menu:rgba(246,246,248,.94)';
+    const colors = { Excel: '#1d7a45', Word: '#2b5eb8', Outlook: '#0f78d4', 'Visual Studio': '#6b3fc4', 'Notepad++': '#5a9e2c', 'Paint.NET': '#d6492f' };
+    const icon = (n) => `width:52px;height:52px;border-radius:12px;background:${colors[n]};color:#fff;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700`;
+    const miniIcon = (n) => `width:18px;height:18px;border-radius:4px;background:${colors[n]};color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700`;
+    const names = Object.keys(colors), q = s.query.toLowerCase();
+    const apps = names.filter(n => n.toLowerCase().includes(q)).map(n => ({ name: n, letter: n[0], icon: icon(n), status: s.run[n] ? 'Open' : '', bg: s.run[n] ? 'var(--card)' : 'transparent', open: () => this.setState({ run: { ...s.run, [n]: true }, vmOn: true }) }));
+    const runningApps = names.filter(n => s.run[n]).map(n => ({ name: n, letter: n[0], icon: miniIcon(n), stop: () => this.setState({ run: { ...s.run, [n]: false } }) }));
+    const rc = runningApps.length;
+    const navDef = [['apps', '▦', 'Apps'], ['machine', '▣', 'Windows'], ['resources', '◔', 'Resources'], ['sharing', '⇄', 'Sharing'], ['snaps', '◷', 'Snapshots']];
+    const nav = navDef.map(([k, g, l]) => ({ glyph: g, label: l, go: set({ screen: k }), style: `padding:6px 10px;border-radius:7px;display:flex;align-items:center;gap:8px;cursor:pointer;${s.screen === k ? 'background:#0f6be0;color:#fff' : ''}` }));
+    const titles = { apps: 'Apps', machine: 'Windows', resources: 'Resources', sharing: 'Sharing', snaps: 'Snapshots' };
+    const cpuUse = s.vmOn ? 14 : 0, ramUse = s.vmOn ? 3.1 : 0;
+    const bar = (p) => `width:${p}%;height:100%;border-radius:3px;background:#0f6be0`;
+    const meters = [{ label: 'CPU', value: cpuUse + '%', bar: bar(cpuUse) }, { label: 'Memory', value: ramUse.toFixed(1) + ' of ' + s.ram + ' GB', bar: bar(ramUse / s.ram * 100) }, { label: 'Disk', value: '21 of ' + s.disk + ' GB', bar: bar(21 / s.disk * 100) }];
+    const ok = s.vmOn ? '#28c840' : '#9a9aa2';
+    const health = [['Guest agent', ':7148', ok], ['Remote display (RDP)', ':3389', ok], ['Windows App client', 'installed', '#28c840'], ['Network', 'Shared · 192.168.64.2', ok]].map(([label, detail, dot]) => ({ label, detail, dot }));
+    const sliders = [{ k: 'cpu', label: 'Processor cores', min: 2, max: 8, step: 1, v: s.cpu, text: s.cpu + ' cores', note: 'Of 10 on this Mac.' }, { k: 'ram', label: 'Memory', min: 4, max: 16, step: 1, v: s.ram, text: s.ram + ' GB', note: s.ram < 6 ? '4 GB is the minimum. Office apps may feel slow.' : 'Of 24 GB on this Mac.' }, { k: 'disk', label: 'Disk size', min: 40, max: 256, step: 8, v: s.disk, text: s.disk + ' GB', note: 'Disks can grow later, not shrink.' }].map(x => ({ label: x.label, min: x.min, max: x.max, step: x.step, val: x.v, text: x.text, note: x.note, set: (e) => this.setState({ [x.k]: +e.target.value }) }));
+    const shDef = [['clip', 'Clipboard', 'Copy and paste between Mac and Windows apps.'], ['home', 'Home folder', 'Windows apps can open files from your Mac.'], ['printers', 'Printers', 'Use Mac printers from Windows apps.'], ['audio', 'Audio', 'Play sound from Windows apps.']];
+    const shares = shDef.map(([k, label, note]) => ({ label, note, flip: () => this.setState({ sh: { ...s.sh, [k]: !s.sh[k] } }), track: `width:38px;height:22px;border-radius:11px;background:${s.sh[k] ? '#28c840' : 'var(--line)'};position:relative;cursor:pointer;flex:none`, knob: `position:absolute;top:2px;left:${s.sh[k] ? 18 : 2}px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .15s` }));
+    const snaps = s.snaps.map((x, i) => ({ name: x.name, meta: x.meta, btn: s.restored === i ? 'Restored' : 'Rewind', restore: () => this.setState({ restored: i }) }));
+    const vmLabel = s.vmOn ? 'Windows is running' : 'Windows is off';
+    return {
+      rootStyle: vars + ';padding:30px;display:inline-block;background:#d8d8dc',
+      dark, themeName: dark ? 'Dark' : 'Light', toggleTheme: set({ dark: !dark }),
+      menuOpen: s.menuOpen, toggleMenu: set({ menuOpen: !s.menuOpen }), menuBtnBg: s.menuOpen ? 'rgba(255,255,255,.3)' : 'transparent', openWindow: set({ menuOpen: false }),
+      vmDot: ok, runningCount: rc || '', vmLabel, vmSub: s.vmOn ? 'CPU 14% · RAM 3.1 GB · ' + rc + ' app' + (rc === 1 ? '' : 's') + ' open' : 'Starts when you open an app',
+      vmAction: s.vmOn ? 'Stop Windows' : 'Start Windows', toggleVm: () => this.setState({ vmOn: !s.vmOn, run: s.vmOn ? Object.fromEntries(names.map(n => [n, false])) : s.run }),
+      runningApps, hasRunning: rc > 0, restartLabel: s.vmOn ? 'Restart Windows VM' : 'Start Windows VM', syncLabel: s.syncing ? 'Syncing…' : 'Sync Apps Now',
+      syncNow: () => { this.setState({ syncing: true }); setTimeout(() => this.setState({ syncing: false }), 1400); },
+      nav, title: titles[s.screen], isApps: s.screen === 'apps', isMachine: s.screen === 'machine', isResources: s.screen === 'resources', isSharing: s.screen === 'sharing', isSnaps: s.screen === 'snaps',
+      query: s.query, setQuery: (e) => this.setState({ query: e.target.value }), apps, appsHint: apps.length + ' Windows apps',
+      meters, health, sliders, advOpen: s.advOpen, toggleAdv: set({ advOpen: !s.advOpen }), advLabel: s.advOpen ? 'Hide advanced' : 'Advanced',
+      advanced: [['Virtual machine name', 'Windows'], ['Remote display port', '127.0.0.1:13389'], ['Guest API port', '127.0.0.1:17148'], ['Display scaling', 'Auto'], ['Hide app launch filter', 'On']].map(([label, value]) => ({ label, value })),
+      shares, folders: [{ mac: '~/Documents', win: 'Z:\\Docs', mode: 'Read & Write' }, { mac: '~/Downloads', win: 'Z:\\Down', mode: 'Read & Write' }, { mac: '~/Desktop', win: 'Z:\\Desk', mode: 'Read only' }],
+      snaps, takeSnap: () => this.setState({ snaps: [...s.snaps, { name: 'Snapshot ' + (s.snaps.length + 1), meta: 'Just now · 11.9 GB' }] }),
+      wizOpen: !!s.wiz, wizWelcome: s.wiz === 'welcome', wizCustomStep: s.wiz === 'custom', wizInstall: s.wiz === 'install', wizDone: s.wiz === 'done',
+      wizStart: set({ wiz: 'install', pct: 0 }), wizCustom: set({ wiz: 'custom' }), wizBack: set({ wiz: 'welcome' }), wizFinish: set({ wiz: null }),
+      wizOpts: [['Windows installer (ISO)', 'Download automatically'], ['Edition', 'Windows 11 Pro ARM64'], ['Cores · Memory · Disk', '4 · 8 GB · 64 GB'], ['VM location', 'Application Support']].map(([label, value]) => ({ label, value })),
+      wizPhase: s.pct < 30 ? 'Downloading Windows…' : s.pct < 85 ? 'Installing Windows…' : 'Adding your apps…', wizPct: s.pct, wizBar: `width:${s.pct}%;height:100%;background:#0f6be0`
+    };
+  }
+}
+</script>
+</body>
+</html>

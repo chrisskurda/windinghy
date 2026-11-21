@@ -114,7 +114,7 @@ export function screenshot(cfg, file = files(cfg).shot) {
 // ---------- the QEMU command line ----------
 
 // media: { windows, unattend, virtio } -> install-time CD-ROMs (all optional at runtime)
-export function qemuArgs(cfg, media = {}, { ramMB = 4096, cpus = 4 } = {}) {
+export function qemuArgs(cfg, media = {}, { ramMB = (cfg.vmRamGB || 6) * 1024, cpus = cfg.vmCpus || 4 } = {}) {
     const f = files(cfg);
     const t = tools();
     const a = [
@@ -161,12 +161,31 @@ export function qemuArgs(cfg, media = {}, { ramMB = 4096, cpus = 4 } = {}) {
     return a;
 }
 
+// Disks can grow, never shrink (qcow2 is sparse, so this costs nothing until Windows uses it).
+// Returns true when the virtual disk was enlarged; Windows must then extend its partition once booted.
+export function growDiskIfNeeded(cfg) {
+    const want = Number(cfg.vmDiskGB) || 0;
+    if (!want || !exists(cfg) || isRunning(cfg)) return false;
+    const info = spawnSync(tools().img, ["info", "--output=json", "-U", files(cfg).disk], { encoding: "utf8" });
+    let have = 0;
+    try { have = JSON.parse(info.stdout)["virtual-size"] / 1073741824; } catch { return false; }
+    if (want <= Math.round(have)) return false;
+    const r = spawnSync(tools().img, ["resize", files(cfg).disk, `${want}G`], { encoding: "utf8" });
+    if (r.status !== 0) return false;
+    fs.writeFileSync(path.join(files(cfg).dir, "needs-extend"), String(want));
+    return true;
+}
+
+export function needsExtend(cfg) { return fs.existsSync(path.join(files(cfg).dir, "needs-extend")); }
+export function clearNeedsExtend(cfg) { fs.rmSync(path.join(files(cfg).dir, "needs-extend"), { force: true }); }
+
 export function start(cfg, media = {}, opts = {}) {
     const f = files(cfg);
     const t = tools();
     if (!t.ok) throw new Error("QEMU isn't installed. Run: brew install qemu");
     if (!exists(cfg)) throw new Error("There's no WinDinghy VM yet. Create it with: dinghy vm create");
     if (isRunning(cfg)) return true;
+    if (!media.windows) growDiskIfNeeded(cfg);   // not during an install
     for (const s of [f.qmp, f.qga]) fs.rmSync(s, { force: true });
     const r = spawnSync(t.qemu, qemuArgs(cfg, media, opts), { encoding: "utf8" });
     if (r.status !== 0) throw new Error(`QEMU failed to start: ${(r.stderr || r.stdout || "").trim().slice(0, 400)}`);

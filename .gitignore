@@ -9,3 +9,6 @@ host/menubar/windinghy-menubar
 
 # Patched FreeRDP build (scripts/build-freerdp.sh)
 /vendor/
+
+# Design handoff archive (its contents live in docs/design/main-window)
+/macOS Hypervisor UI Design.zip
