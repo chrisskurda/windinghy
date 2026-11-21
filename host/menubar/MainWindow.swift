@@ -136,10 +136,13 @@ struct AppsView: View {
             }
             .padding(24)
         }
-        // The grid can open scrolled to the end when the list loads after the first layout.
-        .onAppear { DispatchQueue.main.async { proxy.scrollTo("top", anchor: .top) } }
-        .onChange(of: store.apps.count) { _ in proxy.scrollTo("top", anchor: .top) }
-        .onChange(of: store.query) { _ in proxy.scrollTo("top", anchor: .top) }
+        // The grid can open scrolled to the end when the list loads after the first layout. A task keyed on
+        // the content runs on appear and whenever the list or search changes (works on macOS 13 and later,
+        // unlike onChange, whose one-parameter form is deprecated on 14 and whose replacement needs 14).
+        .task(id: "\(store.apps.count)|\(store.query)") {
+            try? await Task.sleep(nanoseconds: 50_000_000)   // let the grid lay out first
+            proxy.scrollTo("top", anchor: .top)
+        }
         }
         .searchable(text: $store.query, prompt: "Search apps")
         .toolbar {
