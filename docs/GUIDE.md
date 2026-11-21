@@ -38,6 +38,14 @@ macOS asks for **App Management** permission so WinDinghy can update its app lau
 - **Snapshots** are restore points inside the VM's disk: take one before a risky change, rewind if it goes wrong. Rewinding discards everything since.
 - **Storage & Backup** moves the VM to another folder or drive, **exports** a full copy (snapshots included) and **imports** one. Use export as a backup, or to move to another Mac. The Windows password isn't included: run `dinghy login` after an import.
 
+## Reset, reinstall, uninstall
+
+In **Storage & Backup > Reset & uninstall**:
+
+- **Rewind to clean install** goes back to the restore point taken right after setup.
+- **Reinstall Windows** deletes the VM and installs a fresh one with the same account name and resources. It can save a safety export to the Desktop first. Takes 20 to 30 minutes.
+- **Remove Windows** deletes the VM, snapshots, saved password and app launchers (optionally cached downloads and WinDinghy's settings). Exported backups, the Windows installer you downloaded and your Mac files are never touched. Terminal: `dinghy uninstall`.
+
 ## Resources
 
 Cores, memory and disk size apply the next time the VM starts. The disk can grow, not shrink.

@@ -8,6 +8,14 @@ bumps may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- Reset & uninstall (Storage & Backup): rewind to the clean install, reinstall Windows (optional safety export first, same account and resources), or remove Windows from this Mac. CLI: `dinghy vm reinstall --yes [--backup <path>]`, `dinghy uninstall [--yes] [--purge-cache] [--purge-settings]`.
+
+### Fixed
+
+- Deleting a VM only removes the files WinDinghy created, so a custom VM folder that holds anything else is never wiped.
+
 ## [0.2.0] - 2026-11-20
 
 The managed-VM release: WinDinghy now builds and runs its own Windows 11 ARM64 VM (no UTM needed), has a real window instead of a busy menu, and pins everything to a tested set of versions.

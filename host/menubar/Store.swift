@@ -394,6 +394,18 @@ final class AppStore: ObservableObject {
 
     // ---------- first-run setup ----------
 
+    /// Start over with a fresh Windows. Reuses the current account name; optionally exports a safety copy first.
+    func startReinstall(backup: Bool) {
+        let u = (ConfigFile.string("username", "")).split(separator: "\\").last.map(String.init) ?? ""
+        if !u.isEmpty { setupUser = u }
+        reinstalling = true
+        if backup {
+            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd-HHmm"
+            reinstallBackup = NSHomeDirectory() + "/Desktop/WinDinghy-before-reinstall-\(f.string(from: Date())).windinghyvm"
+        } else { reinstallBackup = nil }
+        beginSetup()
+    }
+
     func chooseISO() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.init(filenameExtension: "iso")].compactMap { $0 }
@@ -403,13 +415,20 @@ final class AppStore: ObservableObject {
     }
 
     /// Runs `dinghy vm create --progress …` and turns its PROGRESS lines into the setup screen.
+    var reinstallBackup: String? = nil   // set by Reinstall: export a safety copy first
+    var reinstalling = false
+
     func beginSetup(allowUntested: Bool = false) {
         guard let node = findNode(), let dinghy = findDinghy() else {
             setupPhase = .failed("Can't find node or dinghy.mjs. Run `dinghy vm create` in a terminal instead.")
             return
         }
         setupPhase = .installing(pct: 1, title: "Preparing…")
-        var args = [dinghy, "vm", "create", "--progress", "--disk", "\(diskGB)", "--ram", "\(ramGB * 1024)", "--cpus", "\(cores)"]
+        var args = reinstalling
+            ? [dinghy, "vm", "reinstall", "--yes", "--progress"] + (reinstallBackup.map { ["--backup", $0] } ?? [])
+            : [dinghy, "vm", "create", "--progress"]
+        reinstalling = false   // a retry after a failure must create, not reinstall (the old VM is already gone)
+        args += [ "--disk", "\(diskGB)", "--ram", "\(ramGB * 1024)", "--cpus", "\(cores)"]
         args += ["--user", setupUser.isEmpty ? "WinDinghy" : setupUser]
         if allowUntested { args.append("--allow-untested") }
         if let iso = setupISO { args += ["--iso", iso] }

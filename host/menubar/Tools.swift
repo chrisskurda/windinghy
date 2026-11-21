@@ -210,6 +210,19 @@ final class ToolsStore: ObservableObject {
         run("Importing…", ["vm", "import", url.path], "Imported. Start Windows, then save its password once: dinghy login")
     }
 
+    func uninstall(cache: Bool, settings: Bool, done: @escaping (Bool) -> Void) {
+        var args = ["uninstall", "--yes"]
+        if cache { args.append("--purge-cache") }
+        if settings { args.append("--purge-settings") }
+        storageBusy = "Removing Windows…"; storageMessage = nil
+        cli?.runDinghyCapture(args) { [weak self] status, text in
+            self?.storageBusy = nil
+            self?.storageMessage = status == 0 ? "Windows was removed from this Mac." : (text.split(separator: "\n").last.map(String.init) ?? "That didn't work.")
+            AppStore.shared.refresh()
+            done(status == 0)
+        }
+    }
+
     private func run(_ title: String, _ args: [String], _ ok: String) {
         storageBusy = title; storageMessage = nil
         cli?.runDinghyCapture(args) { [weak self] status, text in
@@ -350,9 +363,63 @@ struct EnterpriseView: View {
 
 // MARK: - Storage & backup
 
+enum ResetKind: String, Identifiable { case rewind, reinstall, uninstall; var id: String { rawValue } }
+
+struct ResetSheet: View {
+    @EnvironmentObject var store: AppStore
+    @EnvironmentObject var tools: ToolsStore
+    let kind: ResetKind
+    @Environment(\.dismiss) var dismiss
+    @StateObject private var backup = Box(true)
+    @StateObject private var cache = Box(false)
+    @StateObject private var settings = Box(false)
+
+    var title: String {
+        switch kind {
+        case .rewind: return "Rewind to the clean install?"
+        case .reinstall: return "Reinstall Windows?"
+        case .uninstall: return "Remove Windows from this Mac?"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title).font(.system(size: 17, weight: .semibold))
+            switch kind {
+            case .rewind:
+                Text("Windows returns to how it was right after setup. Anything you installed or saved inside Windows since then is lost. Your Mac files are not affected.")
+            case .reinstall:
+                Text("The current Windows VM is deleted and a fresh Windows is installed with the same account name, memory and disk settings. Anything inside Windows that isn't in a snapshot or export is lost. Your Mac files are not affected, even the ones Windows sees as Documents or Desktop.")
+                Toggle("Save a safety copy to the Desktop first (about \(Int(store.diskUsedGB.rounded())) GB)", isOn: $backup.value).toggleStyle(.checkbox)
+                Text("Reinstalling takes 20 to 30 minutes.").font(.system(size: 12)).foregroundStyle(.secondary)
+            case .uninstall:
+                Text("Deletes the Windows VM and its snapshots (\(Int(store.diskUsedGB.rounded())) GB), the saved Windows password and your app launchers. Exported backups, the Windows installer you downloaded and your Mac files are not touched.")
+                Toggle("Also remove cached helper downloads", isOn: $cache.value).toggleStyle(.checkbox)
+                Toggle("Also remove WinDinghy's settings", isOn: $settings.value).toggleStyle(.checkbox)
+                Text("The WinDinghy app itself stays; drag it to the Trash to remove it.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(kind == .rewind ? "Rewind" : kind == .reinstall ? "Reinstall" : "Remove Windows", role: .destructive) {
+                    dismiss()
+                    switch kind {
+                    case .rewind: store.rewind("clean-install")
+                    case .reinstall: store.startReinstall(backup: backup.value)
+                    case .uninstall: tools.uninstall(cache: cache.value, settings: settings.value) { _ in }
+                    }
+                }
+            }
+        }
+        .font(.system(size: 13))
+        .padding(22).frame(width: 460)
+    }
+}
+
 struct StorageView: View {
     @EnvironmentObject var store: AppStore
     @EnvironmentObject var tools: ToolsStore
+    @StateObject private var sheet = Box<ResetKind?>(nil)
     var body: some View {
         Form {
             Section {
@@ -373,8 +440,19 @@ struct StorageView: View {
             } header: { Text("Backup") } footer: {
                 Text("Exports don't include your Windows password; save it again after an import.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
+            Section {
+                HStack { Row("Rewind to clean install", "Go back to the restore point taken right after setup."); Spacer(); Button("Rewind…") { sheet.value = .rewind }.disabled(store.snapshotBusy || !store.snapshots.contains { $0.name == "clean-install" }) }
+                HStack { Row("Reinstall Windows", "Delete this Windows and set up a fresh one."); Spacer(); Button("Reinstall…") { sheet.value = .reinstall }.disabled(tools.storageBusy != nil) }
+                HStack { Row("Remove Windows", "Delete the VM, its password and launchers from this Mac."); Spacer(); Button("Remove…") { sheet.value = .uninstall }.disabled(tools.storageBusy != nil) }
+            } header: { Text("Reset & uninstall") } footer: {
+                Text("None of these touch your Mac's own files. Export first if you might want Windows back.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
+        .onAppear { store.loadSnapshots() }
+        .sheet(item: Binding(get: { sheet.value }, set: { sheet.value = $0 })) { kind in
+            ResetSheet(kind: kind).environmentObject(store).environmentObject(tools)
+        }
     }
 }
 

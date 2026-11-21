@@ -1455,10 +1455,64 @@ async function vmImport(cfg, src) {
     say("The Windows password isn't part of a bundle: run  dinghy login  to save it on this Mac.");
 }
 
+
+// ---------- reinstall / uninstall ----------
+
+// Start over with a fresh Windows: stop and delete the VM, then run the normal setup again with the
+// same account name and resources. `--backup <path>` exports a safety copy first.
+async function vmReinstall(cfg, args) {
+    if (!args.includes("--yes")) throw new Error("This deletes the current Windows VM and installs a fresh one. Re-run with --yes to confirm (add --backup <path> to save a copy first).");
+    if (!VM.exists(cfg)) throw new Error("There's no managed VM to reinstall. Use: dinghy vm create");
+    const bi = args.indexOf("--backup");
+    if (bi >= 0) {
+        if (!args[bi + 1]) throw new Error("--backup needs a path.");
+        vmExport(cfg, args[bi + 1]);
+    }
+    const wasUser = (cfg.username ?? "").split("\\").pop();
+    say("Removing the old VM...");
+    VM.destroy(cfg);
+    if (wasUser) keychainDelete(wasUser);
+    const forward = ["--progress", "--allow-untested"].filter(a => args.includes(a));
+    const pass = [];
+    for (const k of ["--iso", "--user", "--disk", "--ram", "--cpus", "--key"]) { const i = args.indexOf(k); if (i >= 0) pass.push(k, args[i + 1]); }
+    if (!pass.includes("--user") && validWindowsUser(wasUser)) pass.push("--user", wasUser);
+    if (!pass.includes("--disk")) pass.push("--disk", String(cfg.vmDiskGB || 64));
+    if (!pass.includes("--ram")) pass.push("--ram", String((cfg.vmRamGB || 6) * 1024));
+    if (!pass.includes("--cpus")) pass.push("--cpus", String(cfg.vmCpus || 4));
+    await vmCreate(cfg, [...forward, ...pass]);
+}
+
+// Remove WinDinghy's data from this Mac. Never touches your own files, exported backups, or the
+// Windows ISO you downloaded; folders shared into Windows are not deleted through.
+async function cmdUninstall(cfg, args) {
+    const settings = args.includes("--purge-settings"), cache = args.includes("--purge-cache");
+    if (!args.includes("--yes")) {
+        const gb = (VM.sizeOnDisk(cfg) / 1e9).toFixed(1);
+        say(`This will remove:\n  - the Windows VM and its snapshots (${gb} GB)\n  - the saved Windows password (Keychain)\n  - the app launchers in ${cfg.appsDir}${cache ? "\n  - cached helper downloads (virtio drivers)" : ""}${settings ? "\n  - WinDinghy's settings and logs" : ""}\nYour Mac files, exported backups and the Windows ISO are not touched.\nRe-run with --yes to do it. Options: --purge-cache  --purge-settings`);
+        return;
+    }
+    if (VM.exists(cfg) || VM.isRunning(cfg)) { say("Removing the Windows VM..."); VM.destroy(cfg); }
+    const user = (cfg.username ?? "").split("\\").pop();
+    if (user) keychainDelete(user);
+    // Launchers: only folders that carry our app.json
+    try {
+        for (const n of fs.readdirSync(cfg.appsDir)) {
+            const d = path.join(cfg.appsDir, n);
+            if (n.endsWith(".app") && fs.existsSync(path.join(d, "Contents", "Resources", "app.json"))) fs.rmSync(d, { recursive: true, force: true });
+        }
+        try { fs.rmdirSync(cfg.appsDir); } catch {}
+    } catch {}
+    if (cache) { try { fs.rmSync(VM.cacheDir(), { recursive: true, force: true }); } catch {} }
+    if (settings) { try { fs.rmSync(CONFIG_DIR, { recursive: true, force: true }); } catch {} }
+    say("Done. WinDinghy's Windows is gone from this Mac.");
+    say("To finish removing WinDinghy itself, delete ~/Applications/WinDinghy.app and the windinghy folder.");
+}
+
 async function cmdVm(cfg, args) {
     const sub = args[0] ?? "status";
     switch (sub) {
         case "create": return vmCreate(cfg, args.slice(1));
+        case "reinstall": return vmReinstall(cfg, args.slice(1));
         case "move": return vmMove(cfg, args[1]);
         case "export": return vmExport(cfg, args[1]);
         case "import": return vmImport(cfg, args[1]);
@@ -2140,6 +2194,7 @@ try {
         }
         case "setup":       await cmdSetup(cfg, rest); break;
         case "vm":          await cmdVm(cfg, rest); break;
+        case "uninstall":   await cmdUninstall(cfg, rest); break;
         case "about":
         case "components":  cmdAbout(cfg, rest.includes("--json")); break;
         case "fix":         await cmdFix(cfg, rest); break;
@@ -2165,6 +2220,8 @@ Usage:
   dinghy domain <status|join|leave|gpupdate>   work, school and domain
   dinghy open-settings <page> open a Windows Settings page (workplace, yourinfo, activation...)
   dinghy vm <move|export|import> ...   relocate, back up or restore the VM
+  dinghy vm reinstall --yes [--backup <path>]   start over with a fresh Windows
+  dinghy uninstall [--yes] [--purge-cache] [--purge-settings]   remove WinDinghy's Windows from this Mac
   dinghy version              print the WinDinghy version`);
     }
 } catch (e) {

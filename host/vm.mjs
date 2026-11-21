@@ -270,9 +270,24 @@ export function createDisk(cfg, gb) {
     fs.copyFileSync(t.varsTemplate, f.vars);
 }
 
+// Removes only the files WinDinghy created, so a vmDir that is (or sits inside) a folder with other
+// things in it is never wiped. The folder itself goes only if that leaves it empty.
 export function destroy(cfg) {
     stop(cfg, 20);
-    fs.rmSync(vmDir(cfg), { recursive: true, force: true });
+    const f = files(cfg);
+    for (const p of [f.disk, f.vars, f.unattend, f.qmp, f.qga, f.pid, f.log, f.shot, f.disk + ".part"]) {
+        try { fs.unlinkSync(p); } catch {}
+    }
+    try { fs.rmSync(path.join(f.dir, "snapshots"), { recursive: true, force: true }); } catch {}
+    try { fs.rmdirSync(f.dir); } catch {}   // only succeeds when empty
+}
+
+export function sizeOnDisk(cfg) {
+    const f = files(cfg);
+    let total = 0;
+    for (const p of [f.disk, f.vars, f.unattend]) { try { total += fs.statSync(p).size; } catch {} }
+    try { for (const n of fs.readdirSync(path.join(f.dir, "snapshots"))) total += fs.statSync(path.join(f.dir, "snapshots", n)).size; } catch {}
+    return total;
 }
 
 // ---------- reading the Windows ISO ----------
