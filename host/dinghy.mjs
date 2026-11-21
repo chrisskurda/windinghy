@@ -662,6 +662,19 @@ function logTail(file) {
     try { return fs.readFileSync(file, "utf8").split("\n").slice(-40).join("\n"); } catch { return ""; }
 }
 
+// macOS "App Management" protection blocks one app from modifying another app's bundle. The launcher
+// bundles in ~/Applications/WinDinghy count as apps, so when the menu-bar app (or dinghy started from
+// it) can't rewrite them, explain the one-time permission instead of failing silently.
+function appManagementHint(err) {
+    if (!err || !/^(EPERM|EACCES)$/.test(err.code ?? "")) return false;
+    const flag = path.join(CONFIG_DIR, "app-management-hint");
+    try { if (Date.now() - fs.statSync(flag).mtimeMs < 600000) return true; } catch {} // at most every 10 minutes
+    try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(flag, ""); } catch {}
+    const out = asDialog(`button returned of (display dialog "macOS is blocking WinDinghy from updating its app launchers (App Management protection).\n\nOpen System Settings > Privacy & Security > App Management, turn on WinDinghy, then try again." with title "WinDinghy" with icon caution buttons {"Not now", "Open Settings"} default button "Open Settings")`);
+    if (out === "Open Settings") spawnSync("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles"]);
+    return true;
+}
+
 // Give the bundle its own copy of the client so macOS shows the app's icon and
 // name in the Dock and menu bar (it keys both off the .app containing the
 // running executable). The copy finds its dylibs via a Contents/lib symlink.
@@ -685,7 +698,7 @@ function bundleClient(bin, bundleDir) {
         try { cur = fs.readlinkSync(lib); } catch {}
         if (cur !== target) { try { fs.unlinkSync(lib); } catch {} fs.symlinkSync(target, lib); }
         return dest;
-    } catch { return bin; }
+    } catch (e) { appManagementHint(e); return bin; }
 }
 
 async function launchNative(cfg, meta, bundleDir, retried = false) {
@@ -695,6 +708,10 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
     if (!pw) { notify("No Windows password saved. Run: dinghy login"); process.exit(1); }
 
     const launchedAt = Date.now();
+    // Windows keeps one live connection per user, so a newer launch replaces this one. Record our
+    // start time; if a later launch has started by the time we exit, we were superseded (silently).
+    const lastLaunchFile = path.join(CONFIG_DIR, "last-launch");
+    try { fs.writeFileSync(lastLaunchFile, String(launchedAt)); } catch {}
     fs.mkdirSync(LOG_DIR, { recursive: true });
     const logFile = path.join(LOG_DIR, `${safeName(meta.Name ?? "desktop")}.log`);
     const fd = fs.openSync(logFile, "w");
@@ -728,6 +745,9 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
         keychainDelete(winUser(cfg));
         return launchNative(cfg, meta, bundleDir, true);
     }
+    let supersededBy = 0;
+    try { supersededBy = Number(fs.readFileSync(lastLaunchFile, "utf8")); } catch {}
+    if (supersededBy > launchedAt) return; // a newer launch took over the Windows session
     const problem = diagnoseExit(cfg, exited, log, (Date.now() - launchedAt) / 1000);
     if (problem) showError(problem.title, problem.message, logFile);
 }
@@ -1506,6 +1526,7 @@ Usage:
   dinghy version              print the WinDinghy version`);
     }
 } catch (e) {
-    console.error(`Error: ${e.message}`);
+    if (appManagementHint(e)) console.error("Error: macOS App Management is blocking WinDinghy from updating its app launchers (System Settings > Privacy & Security > App Management > WinDinghy).");
+    else console.error(`Error: ${e.message}`);
     process.exit(1);
 }

@@ -91,6 +91,13 @@ bumps may include breaking changes).
 
 ### Fixed
 
+- Launching a second app no longer risks a false "Lost the Windows VM" alert on the first
+  one: each launch records its start time and a client that exits after a newer launch has
+  started is treated as superseded (Windows can drop the replaced connection before it
+  sends the "replaced" message, so the log alone can't tell).
+- macOS App Management ("WinDinghy.app was prevented from modifying apps"): when the
+  menu-bar app can't rewrite the app launchers, dinghy now explains the one-time permission
+  (System Settings > Privacy & Security > App Management) and offers to open it.
 - Stale state from an old VM no longer leaks into a new one: the logon banner is stored per
   backend (and the guest tells the Mac when it has none), and the "console session (UTM)"
   advice only appears for UTM VMs.
