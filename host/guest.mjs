@@ -134,6 +134,16 @@ export function ps(name, script, { env = {}, timeout = 300000, secret = false } 
         // The QEMU agent returns stdout directly, and stdin avoids any command-line limits or exposure.
         const envLines = Object.entries(env).map(([k, v]) => `$env:${k}='${String(v).replace(/'/g, "''")}';`).join(" ");
         const wrapped = `$ErrorActionPreference='Continue'; ${envLines} & { ${script} } *>&1 | Out-String`;
+        // PowerShell reading a script from stdin (-Command -) mishandles scripts spanning several lines
+        // (it returns nothing), so multi-line scripts go through a temp file and -File. Secret scripts
+        // stay on stdin so they never touch the guest's disk; they must be a single line.
+        if (/\n/.test(script) && !secret) {
+            const file = `C:\\Windows\\Temp\\dinghy-${crypto.randomBytes(6).toString("hex")}.ps1`;
+            if (!push(name, file, Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(wrapped + "\n", "utf8")]))) return { status: -1, output: "", timedOut: false, error: "couldn't copy the script to the guest" };
+            const r = exec(name, ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file], { timeout });
+            exec(name, ["cmd.exe", "/c", `del "${file}"`], { timeout: 15000 });
+            return { status: r.status, output: (r.stdout ?? "").trim(), timedOut: r.timedOut };
+        }
         const r = exec(name, ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"], { timeout, input: wrapped + "\n" });
         return { status: r.status, output: (r.stdout ?? "").trim(), timedOut: r.timedOut };
     }

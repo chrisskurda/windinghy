@@ -8,7 +8,7 @@ REPO_ROOT="$(cd ../.. && pwd)"
 VERSION="$(sed -n 's/^const VERSION = "\([^"]*\)".*/\1/p' ../dinghy.mjs)"
 
 echo "Compiling..."
-swiftc -O -swift-version 5 main.swift Store.swift MainWindow.swift -o windinghy-menubar
+swiftc -O -swift-version 5 main.swift Store.swift MainWindow.swift Tools.swift -o windinghy-menubar
 
 echo "Assembling bundle at $APP"
 rm -rf "$APP"

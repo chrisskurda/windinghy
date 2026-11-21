@@ -10,6 +10,13 @@ bumps may include breaking changes).
 
 ### Added
 
+- Windows folders (Documents, Downloads, Desktop, Pictures, Music, Videos) redirect to the Mac's equivalents by default, each with a switch in Sharing; `dinghy folders status|on|off|apply`. The home folder stays shared by default.
+- Setup wizard asks for the Windows account name (default: your macOS username); `dinghy vm create --user`.
+- Windows tools (Control Panel, Device Manager, Event Viewer, ...) are classified at sync (`Category` in app.json) and live in their own Windows Tools pane, keeping Apps for user apps. "Windows Desktop" is in the Apps list and has its own pane.
+- Software pane and `dinghy pkg search|list|install|uninstall|upgrade`: winget, no Microsoft account or Store sign-in needed; new apps are synced after an install.
+- Account & Activation pane (`dinghy activation [key <KEY>]`, `dinghy open-settings <page>`) and Work & School pane (`dinghy domain status|join|leave|gpupdate`).
+- Storage & Backup: `dinghy vm move|export|import` to relocate the VM disk or save/restore a full image (snapshots included, password excluded).
+
 - Native RemoteApp client (opt-in/auto): launches use a patched FreeRDP
   `sdl-freerdp` instead of Windows App, so each Windows window is a real
   macOS window. Build it with `scripts/build-freerdp.sh` (patch in `patches/`,

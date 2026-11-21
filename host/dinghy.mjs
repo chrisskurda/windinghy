@@ -54,6 +54,7 @@ const DEFAULTS = {
     vmDiskGB: 64,
     shareClipboard: "on",  // what Windows apps may reach on this Mac (applied at the next app launch)
     shareHome: "on",
+    redirect_documents: "on", redirect_downloads: "on", redirect_desktop: "on", redirect_pictures: "on", redirect_music: "on", redirect_videos: "on",
     sharePrinters: "off",
     shareAudio: "on",
     sharedFolders: [],
@@ -400,12 +401,15 @@ async function cmdSync(cfg) {
 
     let made = 0;
     for (const [key, app] of byName) {
-        const meta = { Name: app.Name, Path: app.Path, Args: app.Args ?? "", Source: app.Source ?? "" };
+        const meta = { Name: app.Name, Path: app.Path, Args: app.Args ?? "", Source: app.Source ?? "", Category: appCategory(app) };
         const appPath = writeAppBundle(cfg, key, app.Name, rdpForApp(cfg, app), app.Icon, tmpDir, meta);
         kept.add(path.basename(appPath));
         made++;
     }
 
+    // Windows Settings (also the target of the helpers that open specific Settings pages)
+    const settingsApp = { Name: "Windows Settings", Path: "C:\\Windows\\explorer.exe", Args: "ms-settings:", Source: "dinghy" };
+    kept.add(path.basename(writeAppBundle(cfg, "Windows Settings", "Windows Settings", rdpForApp(cfg, settingsApp), null, tmpDir, { ...settingsApp, Category: "tool" })));
     // Full-desktop launcher
     const desktopPath = writeAppBundle(cfg, "Windows Desktop", "Windows Desktop", rdpForDesktop(cfg), null, tmpDir, { desktop: true });
     kept.add(path.basename(desktopPath));
@@ -731,6 +735,10 @@ function nativeArgs(cfg, meta, pw) {
     if (cfg.sharePrinters === "on") a.push("/printer");
     const drive = (name, p) => a.push(`/drive:${String(name).replace(/[,\/\\:]/g, "_") || "Share"},${p}`);
     if (cfg.shareHome !== "off") drive("Home", os.homedir());
+    for (const f of KNOWN_FOLDERS) {
+        const mac = path.join(os.homedir(), f.mac);
+        if (redirectOn(cfg, f) && fs.existsSync(mac)) drive(f.share, mac);
+    }
     for (const f of Array.isArray(cfg.sharedFolders) ? cfg.sharedFolders : []) {
         if (typeof f === "string" && fs.existsSync(f)) drive(path.basename(f), f);
     }
@@ -1236,6 +1244,12 @@ async function guestApiUp(cfg) {
     try { return (await fetch(`http://127.0.0.1:${VM.API_PORT}/health`, { signal: AbortSignal.timeout(2500) })).ok; } catch { return false; }
 }
 
+
+const RESERVED_WIN_USERS = /^(administrator|guest|defaultaccount|wdagutilityaccount|system|dinghy-win|windinghy-vm|public|default|admin|root|con|prn|aux|nul)$/i;
+function validWindowsUser(u) {
+    return /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,19}$/.test(u) && !/[. ]$/.test(u) && !RESERVED_WIN_USERS.test(u) && !/^\d+$/.test(u);
+}
+
 async function vmCreate(cfg, args) {
     const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
     // The app window reads these lines to draw its progress bar.
@@ -1265,7 +1279,8 @@ async function vmCreate(cfg, args) {
     const virtio = await ensureVirtioIso();
 
     stepSay("Preparing the VM");
-    const user = "WinDinghy";
+    const user = opt("--user", "WinDinghy");
+    if (!validWindowsUser(user)) throw new Error(`"${user}" can't be a Windows account name (up to 20 letters, numbers, spaces, dots, dashes or underscores; not a reserved name).`);
     const password = randomPassword();
     if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
     cfg.vmCpus = cpus; cfg.vmRamGB = Math.max(1, Math.round(ramMB / 1024)); cfg.vmDiskGB = gb;
@@ -1324,10 +1339,90 @@ async function extendWindowsPartition(cfg) {
     if (/extended/.test(r.output)) VM.clearNeedsExtend(cfg);
 }
 
+
+// ---------- move / export / import the VM (also a simple image backup) ----------
+// A WinDinghy VM bundle is a folder holding the disk (snapshots included), the UEFI variables and a
+// manifest. The Windows password is not included: after an import, `dinghy login` saves it again.
+
+function cloneOrCopy(src, dst) {
+    if (spawnSync("cp", ["-c", src, dst]).status === 0) return;   // APFS clone: instant, no extra space
+    if (spawnSync("cp", [src, dst]).status !== 0) throw new Error(`Couldn't copy ${src} (is there enough free space?)`);
+}
+
+function moveFile(src, dst) {
+    try { fs.renameSync(src, dst); } catch { cloneOrCopy(src, dst); fs.unlinkSync(src); }
+}
+
+function vmMove(cfg, dest) {
+    if (!dest) throw new Error("Usage: dinghy vm move <folder>");
+    dest = path.resolve(dest.replace(/^~(?=\/|$)/, os.homedir()));
+    const from = VM.vmDir(cfg);
+    if (dest === from) { say("The VM is already there."); return; }
+    if (!VM.exists(cfg)) { cfg.vmDir = dest; saveConfig(cfg); say(`New VM location set: ${dest}`); return; }
+    if (fs.existsSync(path.join(dest, "disk.qcow2"))) throw new Error(`There's already a VM disk in ${dest}.`);
+    say("Shutting down Windows...");
+    VM.stop(cfg, 90);
+    fs.mkdirSync(dest, { recursive: true });
+    say(`Moving the VM to ${dest} (this can take a while for a big disk)...`);
+    for (const n of ["disk.qcow2", "efi-vars.fd", "unattend.iso"]) {
+        const f = path.join(from, n);
+        if (fs.existsSync(f)) moveFile(f, path.join(dest, n));
+    }
+    cfg.vmDir = dest; saveConfig(cfg);
+    try { fs.rmSync(from, { recursive: true, force: true }); } catch {}
+    say("Moved. Start Windows again with: dinghy vm start");
+}
+
+function vmExport(cfg, dest) {
+    if (!VM.exists(cfg)) throw new Error("No managed VM to export.");
+    if (!dest) dest = path.join(os.homedir(), "Desktop", `WinDinghy-${new Date().toISOString().slice(0, 10)}.windinghyvm`);
+    dest = path.resolve(dest.replace(/^~(?=\/|$)/, os.homedir()));
+    if (fs.existsSync(dest)) throw new Error(`${dest} already exists.`);
+    const wasRunning = VM.isRunning(cfg);
+    if (wasRunning) { say("Shutting down Windows for a consistent copy..."); VM.stop(cfg, 90); }
+    const f = VM.files(cfg);
+    fs.mkdirSync(dest, { recursive: true });
+    say(`Exporting to ${dest} ...`);
+    cloneOrCopy(f.disk, path.join(dest, "disk.qcow2"));
+    cloneOrCopy(f.vars, path.join(dest, "efi-vars.fd"));
+    fs.writeFileSync(path.join(dest, "manifest.json"), JSON.stringify({
+        format: 1, created: new Date().toISOString(), username: cfg.username,
+        vmCpus: cfg.vmCpus, vmRamGB: cfg.vmRamGB, vmDiskGB: cfg.vmDiskGB,
+    }, null, 2));
+    say(`Exported (${(fs.statSync(path.join(dest, "disk.qcow2")).size / 1e9).toFixed(1)} GB).`);
+    if (wasRunning) { VM.start(cfg); say("Windows is starting again."); }
+    say(dest);
+}
+
+async function vmImport(cfg, src) {
+    if (!src) throw new Error("Usage: dinghy vm import <bundle.windinghyvm>");
+    src = path.resolve(src.replace(/^~(?=\/|$)/, os.homedir()));
+    const disk = path.join(src, "disk.qcow2");
+    if (!fs.existsSync(disk)) throw new Error("That isn't a WinDinghy VM bundle (no disk.qcow2 inside).");
+    if (VM.exists(cfg)) throw new Error("A WinDinghy VM already exists. Export it first if you want to keep it, then: dinghy vm destroy --yes");
+    if (!VM.tools().ok) throw new Error("QEMU isn't installed. Run: brew install qemu");
+    let m = {};
+    try { m = JSON.parse(fs.readFileSync(path.join(src, "manifest.json"), "utf8")); } catch {}
+    const f = VM.files(cfg);
+    fs.mkdirSync(f.dir, { recursive: true });
+    say("Importing...");
+    cloneOrCopy(disk, f.disk);
+    if (fs.existsSync(path.join(src, "efi-vars.fd"))) cloneOrCopy(path.join(src, "efi-vars.fd"), f.vars);
+    else fs.copyFileSync(VM.tools().varsTemplate, f.vars);
+    if (m.vmCpus) cfg.vmCpus = m.vmCpus;
+    if (m.vmRamGB) cfg.vmRamGB = m.vmRamGB;
+    switchBackend(cfg, "qemu", { host: "127.0.0.1", rdpPort: VM.RDP_PORT, apiPort: VM.API_PORT, username: m.username || cfg.username, vmName: VM.VM_NAME, vmMac: "" });
+    say("Imported. Start it with: dinghy vm start");
+    say("The Windows password isn't part of a bundle: run  dinghy login  to save it on this Mac.");
+}
+
 async function cmdVm(cfg, args) {
     const sub = args[0] ?? "status";
     switch (sub) {
         case "create": return vmCreate(cfg, args.slice(1));
+        case "move": return vmMove(cfg, args[1]);
+        case "export": return vmExport(cfg, args[1]);
+        case "import": return vmImport(cfg, args[1]);
         case "start": {
             if (!VM.exists(cfg)) throw new Error("No WinDinghy VM yet. Create it with: dinghy vm create");
             VM.start(cfg);
@@ -1414,6 +1509,242 @@ async function cmdVm(cfg, args) {
         default:
             throw new Error("Usage: dinghy vm <create|start|stop|status|snapshot|snapshots|rewind|snapshot-delete|screenshot|use|destroy>");
     }
+}
+
+// ---------- Windows tools vs apps ----------
+// Keep user apps uncluttered: Windows administration tools get their own place in the window.
+
+const TOOL_NAME = /^(control panel|device manager|event viewer|disk management|disk (space )?cleanup.*|computer management|component services|services|task scheduler|registry editor|task manager|resource monitor|performance monitor|reliability monitor|system information|system configuration|command prompt|windows powershell.*|powershell.*|windows terminal|terminal|windows defender firewall.*|windows firewall.*|local security policy|print management|odbc data sources.*|iscsi initiator|windows memory diagnostic|remote desktop connection|defragment and optimize drives|windows security|diagnostics utility.*|accessibility on-screen keyboard|windows tools|administrative tools|steps recorder|math input panel|windows settings|settings)$/i;
+const TOOL_EXE = /\\(taskmgr|regedit|mmc|cmd|powershell|powershell_ise|msconfig|msinfo32|perfmon|resmon|eventvwr|devmgmt|diskmgmt|services|compmgmt|taskschd|control|cleanmgr|dfrgui|mdsched|iscsicpl|odbcad32|printmanagement|secpol|wt|windowsterminal|mstsc|rstrui|systempropertiesadvanced|msdt|wf)\.(exe|msc)$/i;
+
+function appCategory(app) {
+    if (/\.msc\b/i.test(app.Args ?? "")) return "tool";
+    if (TOOL_NAME.test(String(app.Name ?? "").trim())) return "tool";
+    if (TOOL_EXE.test(String(app.Path ?? ""))) return "tool";
+    return "app";
+}
+
+// ---------- shared guest helpers ----------
+
+function needAgent(cfg) {
+    const vm = G.listVms()[0]?.name ?? cfg.vmName;
+    if (!G.utmInstalled() || G.vmStatus(vm) !== "started") throw new Error("The Windows VM isn't running. Start it first (dinghy vm start).");
+    if (!G.agentUp(vm)) throw new Error("The guest agent isn't answering yet. Give the VM a minute, then try again.");
+    return vm;
+}
+
+// Runs a PowerShell script in the guest and returns the JSON the script printed after a "JSON:" marker.
+function psJson(cfg, script, timeout = 120000) {
+    const vm = needAgent(cfg);
+    const r = G.ps(vm, script, { timeout });
+    const i = r.output.indexOf("JSON:");
+    if (i < 0) throw new Error(r.output.trim().slice(-300) || "No answer from Windows.");
+    try { return JSON.parse(r.output.slice(i + 5).trim()); } catch { throw new Error("Windows returned something unreadable."); }
+}
+
+const psq = s => String(s).replace(/'/g, "''");   // quote for a single-quoted PowerShell string
+
+// ---------- software (winget, no Microsoft account or Store needed) ----------
+// winget.exe is an MSIX app: run as SYSTEM (what the guest agent is) it can't find its framework DLLs
+// unless their folders are on PATH, hence the prologue.
+
+const WINGET_PROLOGUE = `
+$wa = "C:\\Program Files\\WindowsApps"
+$w = (Get-ChildItem "$wa\\Microsoft.DesktopAppInstaller_*_arm64__8wekyb3d8bbwe\\winget.exe" -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1).FullName
+if (-not $w) { "winget isn't installed in this Windows."; return }
+$deps = Get-ChildItem $wa -Directory | Where-Object { $_.Name -like "Microsoft.VCLibs.140.00*arm64*" -or $_.Name -like "Microsoft.UI.Xaml*arm64*" } | ForEach-Object { $_.FullName }
+$env:PATH = (($deps -join ";") + ";" + $env:PATH)
+$common = @("--accept-source-agreements", "--disable-interactivity")
+function ParseTable($text) {
+    $lines = @($text -split "\\r?\\n" | Where-Object { $_.Trim() -ne "" })
+    $sep = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^-{5,}") { $sep = $i; break } }
+    if ($sep -lt 1) { return @() }
+    $hdr = $lines[$sep - 1]
+    $cols = [regex]::Matches($hdr, "\\S+(?: \\S+)*")
+    $rows = @()
+    for ($i = $sep + 1; $i -lt $lines.Count; $i++) {
+        $l = $lines[$i]; $o = [ordered]@{}
+        for ($c = 0; $c -lt $cols.Count; $c++) {
+            $s = $cols[$c].Index
+            $e = if ($c + 1 -lt $cols.Count) { $cols[$c + 1].Index } else { $l.Length }
+            if ($s -ge $l.Length) { $o[$cols[$c].Value] = "" } else { $o[$cols[$c].Value] = $l.Substring($s, [Math]::Min($e, $l.Length) - $s).Trim() }
+        }
+        $rows += [pscustomobject]$o
+    }
+    return $rows
+}
+`;
+
+function validPkgId(id) { return /^[A-Za-z0-9][A-Za-z0-9._+-]{0,120}$/.test(String(id ?? "")); }
+
+async function cmdPkg(cfg, args) {
+    const sub = args[0];
+    const json = args.includes("--json");
+    const rest = args.slice(1).filter(a => a !== "--json");
+    const show = out => console.log(out.trim());
+    if (sub === "search") {
+        const q = rest.join(" ").trim();
+        if (!q) throw new Error("Usage: dinghy pkg search <text>");
+        const res = psJson(cfg, `${WINGET_PROLOGUE}
+$raw = & $w search '${psq(q)}' --source winget @common 2>&1 | Out-String
+$rows = @(ParseTable $raw | Select-Object -First 40 | ForEach-Object { [pscustomobject]@{ name = $_.Name; id = $_.Id; version = $_.Version } })
+"JSON:" + (ConvertTo-Json -InputObject $rows -Compress)`);
+        if (json) console.log(JSON.stringify(res)); else for (const p of res) say(`${p.id.padEnd(40)} ${p.version.padEnd(14)} ${p.name}`);
+    } else if (sub === "list") {
+        const res = psJson(cfg, `${WINGET_PROLOGUE}
+$raw = & $w list --source winget @common 2>&1 | Out-String
+$up = & $w upgrade --source winget @common 2>&1 | Out-String
+$upIds = @{}; foreach ($r in (ParseTable $up)) { if ($r.Id) { $upIds[$r.Id] = $r.Available } }
+$rows = @(ParseTable $raw | ForEach-Object { [pscustomobject]@{ name = $_.Name; id = $_.Id; version = $_.Version; available = $upIds[$_.Id] } })
+"JSON:" + (ConvertTo-Json -InputObject $rows -Compress)`, 300000);
+        if (json) console.log(JSON.stringify(res)); else for (const p of res) say(`${p.id.padEnd(40)} ${p.version.padEnd(14)} ${p.available ? "-> " + p.available : ""}`);
+    } else if (sub === "install" || sub === "uninstall") {
+        const id = rest[0];
+        if (!validPkgId(id)) throw new Error(`Usage: dinghy pkg ${sub} <package id>   (e.g. 7zip.7zip)`);
+        const vm = needAgent(cfg);
+        const r = G.ps(vm, sub === "install" ? `${WINGET_PROLOGUE}
+& $w install --id '${psq(id)}' --exact --source winget --scope machine --silent --accept-package-agreements @common 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0) { "(machine-wide install not offered; trying a per-user install)"; & $w install --id '${psq(id)}' --exact --source winget --silent --accept-package-agreements @common 2>&1 | Out-String }
+"exit=$LASTEXITCODE"` : `${WINGET_PROLOGUE}
+& $w uninstall --id '${psq(id)}' --exact --silent @common 2>&1 | Out-String
+"exit=$LASTEXITCODE"`, { timeout: 1500000 });
+        const ok = /exit=0\b/.test(r.output);
+        show(r.output.replace(/^[\s\S]*?(?=\S)/, "").split("\n").filter(l => l.trim() && !/^[\s\-\\|\/]+$/.test(l)).slice(-12).join("\n"));
+        if (!ok) { process.exitCode = 1; return; }
+        if (sub === "install") { say("\nInstalled. Refreshing your app list..."); await cmdSync(cfg); }
+    } else if (sub === "upgrade") {
+        const vm = needAgent(cfg);
+        const target = rest[0] && validPkgId(rest[0]) ? `--id '${psq(rest[0])}' --exact` : "--all";
+        const r = G.ps(vm, `${WINGET_PROLOGUE}
+& $w upgrade ${target} --source winget --silent --accept-package-agreements @common 2>&1 | Out-String
+"exit=$LASTEXITCODE"`, { timeout: 2400000 });
+        show(r.output.split("\n").filter(l => l.trim() && !/^[\s\-\\|\/]+$/.test(l)).slice(-12).join("\n"));
+    } else {
+        throw new Error("Usage: dinghy pkg <search|list|install|uninstall|upgrade> [--json] ...");
+    }
+}
+
+// ---------- activation ----------
+
+async function cmdActivation(cfg, args) {
+    if (args[0] === "key") {
+        const key = String(args[1] ?? "").toUpperCase();
+        if (!/^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$/.test(key)) throw new Error("A Windows product key looks like XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.");
+        const vm = needAgent(cfg);
+        const r = G.ps(vm, `cscript //nologo C:\\Windows\\System32\\slmgr.vbs /ipk ${key} 2>&1 | Out-String; cscript //nologo C:\\Windows\\System32\\slmgr.vbs /ato 2>&1 | Out-String`, { timeout: 180000 });
+        say(r.output.trim());
+        return;
+    }
+    const res = psJson(cfg, `
+$p = Get-CimInstance SoftwareLicensingProduct -Filter "Name like 'Windows%' and PartialProductKey is not null" | Select-Object -First 1
+$names = @{0='Unlicensed';1='Activated';2='Setting up';3='Grace period';4='Not genuine (grace)';5='Needs activation';6='Extended grace'}
+$o = [pscustomobject]@{ edition = $p.Name; status = $names[[int]$p.LicenseStatus]; activated = ($p.LicenseStatus -eq 1); channel = $p.ProductKeyChannel; partialKey = $p.PartialProductKey }
+"JSON:" + (ConvertTo-Json -InputObject $o -Compress)`);
+    if (args.includes("--json")) console.log(JSON.stringify(res));
+    else say(`${res.edition}\n${res.status} (${res.channel}), key ending ${res.partialKey}`);
+}
+
+// ---------- work / school / domain ----------
+
+async function cmdDomain(cfg, args) {
+    const sub = args[0] ?? "status";
+    if (sub === "status") {
+        const res = psJson(cfg, `
+$cs = Get-CimInstance Win32_ComputerSystem
+$ds = (dsregcmd /status 2>&1 | Out-String)
+$aad = ($ds -match "AzureAdJoined\\s*:\\s*YES")
+$o = [pscustomobject]@{ computer = $cs.Name; domainJoined = [bool]$cs.PartOfDomain; domain = $(if ($cs.PartOfDomain) { $cs.Domain } else { "" }); azureAdJoined = $aad }
+"JSON:" + (ConvertTo-Json -InputObject $o -Compress)`);
+        if (args.includes("--json")) console.log(JSON.stringify(res));
+        else say(res.domainJoined ? `Joined to ${res.domain} (computer ${res.computer})` : res.azureAdJoined ? "Joined to a work or school account (Entra ID)" : `Not joined to a domain (computer ${res.computer})`);
+    } else if (sub === "join" || sub === "leave") {
+        // Credentials arrive as JSON on stdin so they never appear in a process list.
+        const input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
+        const vm = needAgent(cfg);
+        const cred = input.user ? `$c = New-Object PSCredential('${psq(input.user)}', (ConvertTo-SecureString '${psq(input.password ?? "")}' -AsPlainText -Force));` : "";
+        const script = sub === "join"
+            ? `${cred} try { Add-Computer -DomainName '${psq(input.domain)}' -Credential $c ${input.ou ? `-OUPath '${psq(input.ou)}'` : ""} -Force -ErrorAction Stop; 'joined: restart needed' } catch { 'FAILED: ' + $_.Exception.Message }`
+            : `${cred} try { Remove-Computer ${input.user ? "-UnjoinDomainCredential $c" : ""} -Force -ErrorAction Stop; 'left: restart needed' } catch { 'FAILED: ' + $_.Exception.Message }`;
+        if (sub === "join" && !input.domain) throw new Error("A domain name is needed.");
+        const r = G.ps(vm, script.replace(/\n/g, " "), { timeout: 240000, secret: true });
+        say(r.output.trim());
+        if (/FAILED/.test(r.output)) { process.exitCode = 1; return; }
+        if (!args.includes("--no-restart")) { say("Restarting Windows to finish..."); G.ps(vm, "shutdown /r /t 5", { timeout: 30000 }); }
+    } else if (sub === "gpupdate") {
+        const vm = needAgent(cfg);
+        say(G.ps(vm, "gpupdate /force 2>&1 | Out-String", { timeout: 240000 }).output.trim());
+    } else {
+        throw new Error("Usage: dinghy domain <status|join|leave|gpupdate> [--json]");
+    }
+}
+
+// ---------- Mac folders as Windows' own folders (redirection) ----------
+// Windows' Documents, Downloads, Desktop, Pictures, Music and Videos can point at the Mac's folders
+// (shared over RDP as \\tsclient\<Name>). On by default; each can be switched off in Sharing.
+
+const KNOWN_FOLDERS = [
+    { key: "documents", label: "Documents", share: "Documents", mac: "Documents", reg: ["Personal"],                                   local: "Documents" },
+    { key: "downloads", label: "Downloads", share: "Downloads", mac: "Downloads", reg: ["{374DE290-123F-4565-9164-39C4925E467B}"],    local: "Downloads" },
+    { key: "desktop",   label: "Desktop",   share: "Desktop",   mac: "Desktop",   reg: ["Desktop"],                                   local: "Desktop" },
+    { key: "pictures",  label: "Pictures",  share: "Pictures",  mac: "Pictures",  reg: ["My Pictures"],                               local: "Pictures" },
+    { key: "music",     label: "Music",     share: "Music",     mac: "Music",     reg: ["My Music"],                                  local: "Music" },
+    { key: "videos",    label: "Videos",    share: "Movies",    mac: "Movies",    reg: ["My Video"],                                  local: "Videos" },
+];
+
+const redirectOn = (cfg, f) => cfg[`redirect_${f.key}`] !== "off";
+
+async function cmdFolders(cfg, args) {
+    const sub = args[0] ?? "status";
+    if (sub === "status") {
+        const rows = KNOWN_FOLDERS.map(f => ({ key: f.key, label: f.label, mac: path.join(os.homedir(), f.mac), redirected: redirectOn(cfg, f) }));
+        if (args.includes("--json")) console.log(JSON.stringify(rows)); else for (const r of rows) say(`${r.label.padEnd(10)} ${r.redirected ? "-> your Mac's" : "(Windows' own)"} ${r.mac}`);
+        return;
+    }
+    if (sub === "on" || sub === "off") {
+        const which = args[1] === "all" ? KNOWN_FOLDERS : KNOWN_FOLDERS.filter(f => f.key === args[1]);
+        if (!which.length) throw new Error(`Usage: dinghy folders ${sub} <${KNOWN_FOLDERS.map(f => f.key).join("|")}|all>`);
+        for (const f of which) cfg[`redirect_${f.key}`] = sub;
+        saveConfig(cfg);
+        say(`${which.map(f => f.label).join(", ")}: ${sub === "on" ? "now Mac folders" : "back to Windows' own"}. Apply with: dinghy folders apply`);
+        return;
+    }
+    if (sub !== "apply") throw new Error("Usage: dinghy folders <status|on|off|apply> [--json]");
+    // Write each folder's location into the Windows user's registry. A new session picks it up, so the
+    // user's Windows session is signed out afterwards (open Windows apps close).
+    const vm = needAgent(cfg);
+    const user = winUser(cfg).split("\\").pop();
+    const lines = KNOWN_FOLDERS.flatMap(f => f.reg.map(name => {
+        const value = redirectOn(cfg, f) ? `\\\\tsclient\\${f.share}` : `%USERPROFILE%\\${f.local}`;
+        return `Set-ItemProperty -Path $k -Name '${name}' -Value '${psq(value)}' -Type ExpandString`;
+    }));
+    const r = G.ps(vm, `
+$u = '${psq(user)}'
+$sid = (Get-LocalUser -Name $u).SID.Value
+$root = "Registry::HKEY_USERS\\$sid"
+$loaded = $false
+if (-not (Test-Path $root)) {
+    reg load "HKU\\dinghy_tmp" "C:\\Users\\$u\\NTUSER.DAT" | Out-Null
+    $root = "Registry::HKEY_USERS\\dinghy_tmp"; $loaded = $true
+}
+$k = "$root\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+${lines.join("\n")}
+if ($loaded) { [gc]::Collect(); Start-Sleep 1; reg unload "HKU\\dinghy_tmp" | Out-Null }
+# sign the user out so the next app launch starts a session with the new folder locations
+$id = (quser 2>$null | Select-String -Pattern "$u\\s+\\S*\\s+(\\d+)" | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1)
+if ($id) { logoff $id }
+"applied"`, { timeout: 120000 });
+    say(/applied/.test(r.output) ? "Folder locations updated. Open a Windows app to see them." : `Couldn't update the folders:\n${r.output.trim()}`);
+}
+
+// ---------- open a Windows Settings page ----------
+
+async function cmdOpenSettings(cfg, page) {
+    if (!/^[a-z0-9-]{0,40}$/i.test(page ?? "")) throw new Error("Usage: dinghy open-settings <page>   (e.g. workplace, yourinfo, activation)");
+    const bundle = path.join(cfg.appsDir, "Windows Settings.app", "Contents", "Resources");
+    if (!fs.existsSync(bundle)) throw new Error('No "Windows Settings" launcher yet. Run: dinghy sync');
+    if (!await ensureGuest(cfg, false)) throw new Error("Can't reach the Windows VM.");
+    await launchNative(cfg, { Name: "Windows Settings", Path: "C:\\Windows\\explorer.exe", Args: `ms-settings:${page}`, Source: "dinghy" }, bundle);
 }
 
 // ---------- hands-free setup and repair (UTM guest agent) ----------
@@ -1737,6 +2068,11 @@ try {
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
         case "update":      cmdUpdate(); break;
         case "login":       cmdLogin(cfg); break;
+        case "pkg":         await cmdPkg(cfg, rest); break;
+        case "activation":  await cmdActivation(cfg, rest); break;
+        case "domain":      await cmdDomain(cfg, rest); break;
+        case "folders":     await cmdFolders(cfg, rest); break;
+        case "open-settings": await cmdOpenSettings(cfg, rest[0]); break;
         case "permissions": {
             let ok;
             if (rest.includes("--prompt")) {

@@ -225,7 +225,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // ---------- managed VM tools (Windows VM submenu) ----------
 
     // Runs `dinghy <args>` and hands back everything it printed.
-    func runDinghyCapture(_ args: [String], done: @escaping (Int32, String) -> Void) {
+    func runDinghyCapture(_ args: [String], input: String? = nil, done: @escaping (Int32, String) -> Void) {
         guard let node = findNode(), let dinghy = findDinghy() else { return }
         DispatchQueue.global().async {
             let p = Process()
@@ -233,10 +233,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             p.arguments = [dinghy] + args
             let pipe = Pipe()
             p.standardOutput = pipe; p.standardError = Pipe()
+            let inPipe = Pipe()
+            p.standardInput = inPipe
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             p.environment = env
             do { try p.run() } catch { DispatchQueue.main.async { done(1, "") }; return }
+            if let input { inPipe.fileHandleForWriting.write(Data(input.utf8)) }
+            try? inPipe.fileHandleForWriting.close()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             DispatchQueue.main.async { done(p.terminationStatus, String(data: data, encoding: .utf8) ?? "") }
@@ -354,7 +358,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     @objc func openMainWindow() {
         AppStore.shared.delegate = self
         if mainWindow == nil {
-            let host = NSHostingController(rootView: MainView().environmentObject(AppStore.shared))
+            let host = NSHostingController(rootView: MainView().environmentObject(AppStore.shared).environmentObject(ToolsStore.shared))
             let w = NSWindow(contentViewController: host)
             w.title = "WinDinghy"
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable]

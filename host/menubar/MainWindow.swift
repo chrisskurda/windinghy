@@ -32,11 +32,14 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: Binding(get: { store.screen }, set: { store.screen = $0 ?? .apps })) {
-            ForEach(Screen.allCases.filter { $0 != .general }) { s in
-                Label(s.title, systemImage: s.symbol).tag(s)
+            ForEach(Screen.sections, id: \.0) { section in
+                Section(section.0) {
+                    ForEach(section.1) { s in Label(s.title, systemImage: s.symbol).tag(s) }
+                }
             }
-            Divider().padding(.vertical, 4)
-            Label(Screen.general.title, systemImage: Screen.general.symbol).tag(Screen.general)
+            Section {
+                Label(Screen.general.title, systemImage: Screen.general.symbol).tag(Screen.general)
+            }
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) { StatusCard().padding(10) }
@@ -74,6 +77,12 @@ struct DetailView: View {
         Group {
             switch store.screen {
             case .apps: AppsView()
+            case .tools: AppsView(tools: true)
+            case .desktop: DesktopView()
+            case .software: SoftwareView()
+            case .account: AccountView()
+            case .enterprise: EnterpriseView()
+            case .storage: StorageView()
             case .machine: MachineView()
             case .resources: ResourcesView()
             case .sharing: SharingView()
@@ -114,15 +123,16 @@ struct StatusDot: View {
 
 struct AppsView: View {
     @EnvironmentObject var store: AppStore
+    var tools = false
     let columns = [GridItem(.adaptive(minimum: 112), spacing: 16)]
 
     var body: some View {
-        let apps = store.filteredApps()
+        let apps = store.filteredApps(tools: tools)
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Color.clear.frame(height: 0).id("top")
-                Text("\(store.apps.count) Windows apps").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text(tools ? "Windows administration tools, kept apart from your apps." : "\(store.apps.filter { !$0.isTool }.count) Windows apps").font(.system(size: 13)).foregroundStyle(.secondary)
                 if apps.isEmpty {
                     Text(store.apps.isEmpty ? "No apps yet. Choose Sync Apps Now once Windows is running." : "No apps match “\(store.query)”.")
                         .foregroundStyle(.secondary).padding(.top, 30).frame(maxWidth: .infinity)
@@ -329,11 +339,31 @@ struct SharingView: View {
         Form {
             Section {
                 Toggle(isOn: $store.shareClipboard) { Row("Clipboard", "Copy and paste between Mac and Windows apps.") }
-                Toggle(isOn: $store.shareHome) { Row("Home folder", "Windows apps can open files from your Mac.") }
+                Toggle(isOn: $store.shareHome) { Row("Home folder", "Your Mac home appears in Windows as \\\\tsclient\\Home.") }
                 Toggle(isOn: $store.sharePrinters) { Row("Printers", "Use Mac printers from Windows apps.") }
                 Toggle(isOn: $store.shareAudio) { Row("Audio", "Play sound from Windows apps.") }
             } footer: {
                 Text("Changes apply the next time an app opens.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .toggleStyle(.switch)
+            Section {
+                ForEach(KnownFolder.all, id: \.key) { f in
+                    Toggle(isOn: Binding(get: { store.redirects[f.key] ?? true }, set: { store.setRedirect(f.key, $0) })) {
+                        Row(f.label, "Windows \(f.label) is your Mac's \(f.mac) folder.")
+                    }
+                }
+                if store.redirectDirty {
+                    HStack {
+                        Text("Windows apps will close and reopen to use the new locations.").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Apply Now") { store.applyRedirects() }
+                    }
+                }
+            } header: {
+                Text("Windows folders")
+            } footer: {
+                Text("On by default, so files saved in Windows land in your Mac folders. Turn a folder off to keep Windows' own copy. macOS may ask permission the first time an app opens one of them.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             .toggleStyle(.switch)
             Section("Shared folders") {
@@ -529,11 +559,13 @@ struct SetupView: View {
                     Text(store.setupISO.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Find in Downloads").foregroundStyle(.secondary)
                     Button("Choose…") { store.chooseISO() }
                 }
+                HStack { Text("Windows account name"); Spacer()
+                    TextField("", text: $store.setupUser).textFieldStyle(.roundedBorder).frame(width: 160).multilineTextAlignment(.trailing) }
                 HStack { Text("Edition"); Spacer(); Text("Windows 11 Pro · ARM64").foregroundStyle(.secondary) }
                 HStack { Text("Cores · Memory · Disk"); Spacer(); Text("\(store.cores) · \(store.ramGB) GB · \(store.diskGB) GB").foregroundStyle(.secondary) }
                 HStack { Text("VM location"); Spacer(); Text("Application Support").foregroundStyle(.secondary) }
             }
-            .formStyle(.grouped).frame(height: 190)
+            .formStyle(.grouped).frame(height: 230)
             Text("Windows needs Microsoft's installer. If it isn't in Downloads, WinDinghy opens Microsoft's download page and continues when the file arrives.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {

@@ -107,3 +107,9 @@ A general RDP connection manager built on the same patched FreeRDP:
 - Refactor config from one `host` to `hosts[]`; app bundles reference a host id.
 - Shares the credential, certificate-pinning and error-reporting code with
   the RemoteApp path.
+
+## Not yet possible (decided 2026-11)
+
+- **Windows Desktop embedded in the main window** needs an in-process RDP view (libfreerdp plus AppKit rendering). Today it opens in its own full-screen-capable window. The same work enables one-connection Dock identity and a Start widget.
+- **USB sharing** needs the URBDRC channel built against libusb plus a device picker.
+- **Read-only shared folders**: FreeRDP's drive channel has no read-only mode.

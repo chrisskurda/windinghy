@@ -5,33 +5,55 @@ import SwiftUI
 import AppKit
 
 enum Screen: String, CaseIterable, Identifiable {
-    case apps, machine, resources, sharing, snapshots, general
+    case apps, desktop, tools, software
+    case account, enterprise
+    case machine, resources, sharing, snapshots, storage
+    case general
     var id: String { rawValue }
     var title: String {
         switch self {
         case .apps: return "Apps"
+        case .desktop: return "Windows Desktop"
+        case .tools: return "Windows Tools"
+        case .software: return "Software"
+        case .account: return "Account & Activation"
+        case .enterprise: return "Work & School"
         case .machine: return "Windows"
         case .resources: return "Resources"
         case .sharing: return "Sharing"
         case .snapshots: return "Snapshots"
+        case .storage: return "Storage & Backup"
         case .general: return "General"
         }
     }
     var symbol: String {
         switch self {
         case .apps: return "square.grid.2x2"
+        case .desktop: return "display"
+        case .tools: return "wrench.and.screwdriver"
+        case .software: return "shippingbox"
+        case .account: return "person.crop.circle.badge.checkmark"
+        case .enterprise: return "building.2"
         case .machine: return "macwindow"
         case .resources: return "cpu"
         case .sharing: return "arrow.left.arrow.right"
         case .snapshots: return "clock.arrow.circlepath"
+        case .storage: return "externaldrive"
         case .general: return "gearshape"
         }
     }
+    /// Sidebar groups, in order (General sits alone at the bottom).
+    static let sections: [(String, [Screen])] = [
+        ("Apps", [.apps, .desktop, .tools, .software]),
+        ("Windows", [.account, .enterprise]),
+        ("Virtual Machine", [.machine, .resources, .sharing, .snapshots, .storage]),
+    ]
 }
 
 struct WinApp: Identifiable, Hashable {
     let id: String      // full path of the generated .app
     let name: String
+    var isTool = false
     var path: String { id }
 }
 
@@ -111,6 +133,12 @@ final class AppStore: ObservableObject {
     @Published var shareHome: Bool { didSet { ConfigFile.setBool("shareHome", shareHome) } }
     @Published var sharePrinters: Bool { didSet { ConfigFile.setBool("sharePrinters", sharePrinters) } }
     @Published var shareAudio: Bool { didSet { ConfigFile.setBool("shareAudio", shareAudio) } }
+    @Published var redirects: [String: Bool] = {
+        var d: [String: Bool] = [:]
+        for k in ["documents", "downloads", "desktop", "pictures", "music", "videos"] { d[k] = ConfigFile.bool("redirect_" + k, true) }
+        return d
+    }()
+    @Published var redirectDirty = false
     @Published var folders: [String] { didSet { ConfigFile.set("sharedFolders", folders) } }
 
     // general
@@ -120,6 +148,7 @@ final class AppStore: ObservableObject {
 
     // first-run setup
     @Published var setupPhase: SetupPhase? = nil
+    @Published var setupUser: String = NSUserName().filter { $0.isLetter || $0.isNumber || "._- ".contains($0) }
     @Published var setupISO: String? = nil   // nil = find in ~/Downloads
 
     static let debugSetup = CommandLine.arguments.contains { $0.hasPrefix("--setup=") }
@@ -244,9 +273,15 @@ final class AppStore: ObservableObject {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: c.appsDir) else { return [] }
         return entries
-            .filter { $0.hasSuffix(".app") && $0 != "Windows Desktop.app" }
+            .filter { $0.hasSuffix(".app") }
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-            .map { WinApp(id: c.appsDir + "/" + $0, name: String($0.dropLast(4))) }
+            .map { entry in
+                let dir = c.appsDir + "/" + entry
+                var tool = false
+                if let d = fm.contents(atPath: dir + "/Contents/Resources/app.json"),
+                   let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { tool = (j["Category"] as? String) == "tool" }
+                return WinApp(id: dir, name: String(entry.dropLast(4)), isTool: tool)
+            }
     }
 
     /// Names of launchers whose RDP client process is alive.
@@ -259,9 +294,10 @@ final class AppStore: ObservableObject {
         return names
     }
 
-    func filteredApps() -> [WinApp] {
+    func filteredApps(tools: Bool = false) -> [WinApp] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        return q.isEmpty ? apps : apps.filter { $0.name.lowercased().contains(q) }
+        let pool = apps.filter { $0.isTool == tools }
+        return q.isEmpty ? pool : pool.filter { $0.name.lowercased().contains(q) }
     }
 
     func launch(_ app: WinApp) {
@@ -305,6 +341,19 @@ final class AppStore: ObservableObject {
     }
 
     func openDesktop() { delegate?.openDesktop() }
+
+    // ---------- folder redirection ----------
+
+    func setRedirect(_ key: String, _ on: Bool) {
+        redirects[key] = on
+        ConfigFile.setBool("redirect_" + key, on)
+        redirectDirty = true
+    }
+
+    func applyRedirects() {
+        redirectDirty = false
+        delegate?.runDinghyCapture(["folders", "apply"]) { _, _ in }
+    }
 
     // ---------- snapshots ----------
 
@@ -354,6 +403,7 @@ final class AppStore: ObservableObject {
         }
         setupPhase = .installing(pct: 1, title: "Preparing…")
         var args = [dinghy, "vm", "create", "--progress", "--disk", "\(diskGB)", "--ram", "\(ramGB * 1024)", "--cpus", "\(cores)"]
+        args += ["--user", setupUser.isEmpty ? "WinDinghy" : setupUser]
         if let iso = setupISO { args += ["--iso", iso] }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: node)
@@ -396,4 +446,15 @@ final class AppStore: ObservableObject {
         }
         do { try p.run() } catch { setupPhase = .failed(error.localizedDescription) }
     }
+}
+
+struct KnownFolder { let key: String; let label: String; let mac: String
+    static let all = [
+        KnownFolder(key: "documents", label: "Documents", mac: "Documents"),
+        KnownFolder(key: "downloads", label: "Downloads", mac: "Downloads"),
+        KnownFolder(key: "desktop", label: "Desktop", mac: "Desktop"),
+        KnownFolder(key: "pictures", label: "Pictures", mac: "Pictures"),
+        KnownFolder(key: "music", label: "Music", mac: "Music"),
+        KnownFolder(key: "videos", label: "Videos", mac: "Movies"),
+    ]
 }
