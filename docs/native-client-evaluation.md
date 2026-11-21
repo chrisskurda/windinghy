@@ -90,3 +90,14 @@ macOS Space under every RemoteApp window:
 - Stop sending the "press any key" space bar after ~12 s, or it presses buttons in Setup's UI.
 - virtio-win has ARM64 **drivers** but **no ARM64 guest-agent MSI**; install `qemu-ga-x86_64.msi`
   (runs under Windows on ARM's x64 emulation) and the drivers via `pnputil`.
+- Retail (consumer) ISOs stop at the "Product key" page even when the answer file selects an
+  edition: supply Microsoft's generic install key for the edition (installs unactivated).
+- Evaluation ISOs expire: the IoT LTSC 2024 eval image (built 2024) reported
+  `TIMEBASED_EVAL ... grace time expired` in 2026 and would shut down hourly. Use retail media.
+- The unattend `<LocalAccount><Group>Administrators</Group>` was ignored, leaving a standard user
+  whose first-logon script couldn't install drivers or run setup. Log on the first time as the
+  built-in Administrator (`AdministratorPassword` + AutoLogon), create the real account in the
+  script, then disable Administrator.
+- A user whose name equals the computer name (`WinDinghy` on `WINDINGHY`) is unresolvable by
+  bare name (`net localgroup` error 1317; `Add-LocalGroupMember` fails silently): qualify as
+  `COMPUTER\user`, and don't name the computer after the user.

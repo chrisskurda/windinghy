@@ -248,6 +248,15 @@ export function chooseEdition(editions) {
     return pick(/IoTEnterprise|Enterprise/i) ?? pick(/Professional|Pro\b/i) ?? editions[0] ?? { index: 1, name: "(unknown)", edition: "" };
 }
 
+// Microsoft's published generic installation keys. They only get retail media past Setup's
+// "Product key" page; they do not activate Windows. Enterprise/IoT/volume media need none.
+const GENERIC_KEYS = {
+    Core: "YTMG3-N6DKC-DKB77-7M9GH-8HVX7",
+    CoreSingleLanguage: "BT79Q-G7N6G-PGBYW-4YWX6-6F4BT",
+    Professional: "VK7JG-NPHTM-C97JM-9MPGT-3V66T",
+};
+export function genericKey(edition) { return GENERIC_KEYS[edition?.edition] ?? null; }
+
 // IANA zone -> Windows zone id for the unattended install (UTC if unknown).
 const WIN_TZ = {
     "America/New_York": "Eastern Standard Time", "America/Detroit": "Eastern Standard Time", "America/Chicago": "Central Standard Time",
@@ -262,7 +271,7 @@ function xml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").
 // autounattend.xml for Windows 11 IoT Enterprise LTSC (arm64): GPT/UEFI layout, local admin account,
 // autologon once, and a FirstLogon script that installs the virtio drivers + guest agent and
 // then runs WinDinghy's setup.ps1 from the Mac.
-export function unattendXml({ user, password, imageIndex = 1 }) {
+export function unattendXml({ user, password, imageIndex = 1, productKey = null }) {
     const tz = WIN_TZ[Intl.DateTimeFormat().resolvedOptions().timeZone] ?? "UTC";
     const c = (name, pass, body) => `    <component name="${name}" processorArchitecture="arm64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n${body}\n    </component>`;
     // Setup can't see the install CD until the virtio-scsi driver is loaded.
@@ -300,10 +309,10 @@ ${part(3, "Primary", 0, true)}
         <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
         <InstallFrom><MetaData wcm:action="add"><Key>/IMAGE/INDEX</Key><Value>${imageIndex}</Value></MetaData></InstallFrom>
       </OSImage></ImageInstall>
-      <UserData><AcceptEula>true</AcceptEula></UserData>`)}
+      <UserData><AcceptEula>true</AcceptEula>${productKey ? `<ProductKey><Key>${xml(productKey)}</Key><WillShowUI>OnError</WillShowUI></ProductKey>` : ""}</UserData>`)}
   </settings>
   <settings pass="specialize">
-${c("Microsoft-Windows-Shell-Setup", "specialize", `      <ComputerName>WINDINGHY</ComputerName>
+${c("Microsoft-Windows-Shell-Setup", "specialize", `      <ComputerName>DINGHY-WIN</ComputerName>
       <TimeZone>${xml(tz)}</TimeZone>`)}
   </settings>
   <settings pass="oobeSystem">
@@ -317,16 +326,10 @@ ${c("Microsoft-Windows-Shell-Setup", "oobeSystem", `      <OOBE>
         <SkipUserOOBE>true</SkipUserOOBE>
       </OOBE>
       <UserAccounts>
-        <LocalAccounts>
-          <LocalAccount wcm:action="add">
-            <Name>${xml(user)}</Name>
-            <Group>Administrators</Group>
-            <Password><Value>${xml(password)}</Value><PlainText>true</PlainText></Password>
-          </LocalAccount>
-        </LocalAccounts>
+        <AdministratorPassword><Value>${xml(password)}</Value><PlainText>true</PlainText></AdministratorPassword>
       </UserAccounts>
       <AutoLogon>
-        <Enabled>true</Enabled><LogonCount>1</LogonCount><Username>${xml(user)}</Username>
+        <Enabled>true</Enabled><LogonCount>5</LogonCount><Username>Administrator</Username>
         <Password><Value>${xml(password)}</Value><PlainText>true</PlainText></Password>
       </AutoLogon>
       <FirstLogonCommands>
@@ -339,7 +342,7 @@ ${c("Microsoft-Windows-Shell-Setup", "oobeSystem", `      <OOBE>
 
 // Runs once at first logon, from the answer-file CD. Installs drivers + guest agent, waits for the
 // Mac (10.0.2.2), then runs setup.ps1 (RDP, RemoteApp, guest server).
-export function firstLogonScript(setupPort) {
+export function firstLogonScript(setupPort, user, password) {
     return `$ErrorActionPreference = 'Continue'
 Start-Transcript -Path C:\\Windows\\Temp\\dinghy-firstlogon.log -Force | Out-Null
 # The virtio ISO: drivers (ARM64) and the guest agent. There is no ARM64 agent MSI; the x64 one runs
@@ -354,10 +357,22 @@ if ($root) {
     Start-Process msiexec.exe -ArgumentList '/i', (Join-Path $root 'guest-agent\\qemu-ga-x86_64.msi'), '/qn', '/norestart' -Wait
     Start-Service QEMU-GA -ErrorAction SilentlyContinue
 } else { Write-Host "virtio ISO not found" }
+# The account WinDinghy uses for RDP (this first logon runs as the built-in Administrator).
+$p = ConvertTo-SecureString '${password.replace(/'/g, "''")}' -AsPlainText -Force
+if (Get-LocalUser -Name '${user}' -ErrorAction SilentlyContinue) { Set-LocalUser -Name '${user}' -Password $p } else { New-LocalUser -Name '${user}' -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName 'WinDinghy apps' | Out-Null }
+# Qualify the member with the computer name: a bare name that equals the computer name resolves to the computer, not the user.
+$member = "$env:COMPUTERNAME\\${user}"
+foreach ($g in 'Administrators','Remote Desktop Users') { net localgroup $g $member /add | Out-Host }
 for ($i = 0; $i -lt 120; $i++) {
     try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('10.0.2.2', ${setupPort}); $c.Close(); break } catch { Start-Sleep 5 }
 }
-try { Invoke-RestMethod -Uri http://10.0.2.2:${setupPort}/setup.ps1 -UseBasicParsing | Invoke-Expression } catch { Write-Host "setup failed: $_" }
+$ok = $false
+try { Invoke-RestMethod -Uri http://10.0.2.2:${setupPort}/setup.ps1 -UseBasicParsing | Invoke-Expression; $ok = $true } catch { Write-Host "setup failed: $_" }
+if ($ok) {
+    # Done: stop auto-logging in as the built-in Administrator and disable it.
+    Set-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' AutoAdminLogon 0 -ErrorAction SilentlyContinue
+    Disable-LocalUser -Name 'Administrator' -ErrorAction SilentlyContinue
+}
 Stop-Transcript | Out-Null
 `;
 }
@@ -378,13 +393,13 @@ function stageWinPEDrivers(virtioIso, dest) {
 }
 
 // Build the answer-file CD (autounattend.xml + firstlogon.ps1) with macOS's hdiutil.
-export function buildUnattendIso(cfg, { user, password, setupPort, imageIndex = 1, virtioIso = null }) {
+export function buildUnattendIso(cfg, { user, password, setupPort, imageIndex = 1, virtioIso = null, productKey = null }) {
     const f = files(cfg);
     const stage = fs.mkdtempSync(path.join(os.tmpdir(), "dinghy-unattend-"));
     // (No $WinPEDriver$ folder: Setup's own driver injection of those packages fails with 0x80070103;
     //  the explicit drvload in autounattend.xml is enough to expose the install CD.)
-    fs.writeFileSync(path.join(stage, "autounattend.xml"), unattendXml({ user, password, imageIndex }));
-    fs.writeFileSync(path.join(stage, "firstlogon.ps1"), firstLogonScript(setupPort));
+    fs.writeFileSync(path.join(stage, "autounattend.xml"), unattendXml({ user, password, imageIndex, productKey }));
+    fs.writeFileSync(path.join(stage, "firstlogon.ps1"), firstLogonScript(setupPort, user, password));
     fs.rmSync(f.unattend, { force: true });
     const r = spawnSync("hdiutil", ["makehybrid", "-iso", "-joliet", "-default-volume-name", "UNATTEND", "-o", f.unattend, stage], { encoding: "utf8" });
     fs.rmSync(stage, { recursive: true, force: true });

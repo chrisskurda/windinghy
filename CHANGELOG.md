@@ -75,15 +75,25 @@ bumps may include breaking changes).
 - The native client no longer shows FreeRDP's unscaled "connection is being
   established" dialog.
 
-- WIP: a VM WinDinghy manages itself on QEMU + Hypervisor.framework (no UTM):
-  `dinghy vm create|start|stop|status|screenshot|use|destroy`. Headless, user-mode
-  networking with forwarded ports (127.0.0.1:13389 RDP, :17148 guest API, so the
-  address never changes), QEMU guest agent for exec/files, unattended Windows 11
-  install (answer-file CD built with hdiutil). Verified: headless boot, QMP, keys,
-  screenshots. Not yet verified: the full Windows install (needs an ARM64 ISO).
+- `dinghy vm create`: a Windows 11 VM WinDinghy builds and runs itself on QEMU +
+  Hypervisor.framework, no UTM. Headless, user-mode networking with forwarded ports
+  (RDP 127.0.0.1:13389, guest API :17148, so the address never changes), QEMU guest
+  agent for exec/files. Fully unattended: it finds an ARM64 Windows ISO in ~/Downloads
+  (or opens Microsoft's page), reads the ISO's editions and picks Enterprise/IoT/Pro,
+  builds an answer-file CD, installs (about 6 minutes), installs drivers and the guest
+  agent, runs `setup.ps1` from the Mac, creates a dedicated "WinDinghy" account with a
+  random password in the Keychain, and syncs your apps. Verified on Windows 11 24H2 Pro:
+  9 GB on disk, RemoteApp through the native client works. Retail ISOs use Microsoft's
+  generic install key (installs unactivated; `--key` for your own).
+  Also `dinghy vm start|stop|status|screenshot|use|destroy`; `dinghy vm use utm|qemu`
+  switches between a UTM VM and the managed one (each keeps its own settings).
+- `dinghy fix login` repairs the dedicated Windows account (group membership, password).
 
 ### Fixed
 
+- A Remote Desktop *authorization* failure (account not in Remote Desktop Users) no
+  longer makes the launcher discard the saved password; only a real logon failure does,
+  and the error alert now says what's wrong.
 - The native client exits about 3 seconds after an app's last window closes
   (it used to linger with a blank Dock icon until the server disconnected
   ~20s later), and a normal close no longer raises a "session ended" error.

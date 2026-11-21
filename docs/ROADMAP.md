@@ -64,9 +64,11 @@ Existing projects doing the same thing, useful as references (check licenses bef
 Open question from their notes: TPM under HVF depends on the QEMU version (alcove disables
 it; vitrine and SiliconWin use swtpm).
 
-Order: (1) `guest.mjs` transport (done for UTM), (2) QEMU transport behind the same
-interface + `dinghy vm create/start/stop/snapshot`, (3) unattended installer, (4) make
-it the default, UTM stays supported.
+Status: (1) guest transport, (2) QEMU backend + `dinghy vm`, and (3) the unattended installer
+are done and verified (Windows 11 Pro, ~6 min, 9 GB). Remaining: (4) make it the default for
+new users with UTM kept as "bring your own VM"; qcow2 snapshots ("rewind to clean"); try a
+nano11-style stripped ISO as `--iso`; TPM (swtpm) if an edition needs it; a `dinghy vm`
+menu-bar flow; move the VM to an external disk (`vmDir`).
 
 ## Connection manager (no RemoteApp)
 A general RDP connection manager built on the same patched FreeRDP:

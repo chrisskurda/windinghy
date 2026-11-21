@@ -7,7 +7,7 @@
 // Commands:
 //   dinghy vm <create|start|stop|status|screenshot|use|destroy>  the VM WinDinghy manages itself (QEMU, no UTM)
 //   dinghy setup                hands-free setup via the UTM guest agent (falls back to serve-setup)
-//   dinghy fix [session|rdp|clock|server]  repair common guest problems via the guest agent
+//   dinghy fix [session|rdp|clock|server|login]  repair common guest problems via the guest agent
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
 //                               (--no-banner or config suppressBanner=on: keep the Windows banner suppressed; opt-in, may violate network policy)
 //   dinghy status               guest health / version / metrics
@@ -719,7 +719,7 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
     // Connected: stay alive until the client exits, then explain any failure.
     while (exited === null) await new Promise(r => setTimeout(r, 1000));
     const log = logTail(logFile);
-    if (/LOGON_FAILURE|ACCESS_DENIED|0x00020014/.test(log) && !retried) {
+    if (/ERRCONNECT_LOGON_FAILURE|0x00020014/.test(log) && !retried) {
         keychainDelete(winUser(cfg));
         return launchNative(cfg, meta, bundleDir, true);
     }
@@ -732,8 +732,10 @@ function diagnoseExit(cfg, code, log) {
     if (/LAST-WINDOW-CLOSED/.test(log)) return null;
     if (/ERRINFO_RPC_INITIATED_DISCONNECT_BY_USER|ERRINFO_DISCONNECT_BY_USER/.test(log)) return null;
     if (code === 0 || code === null || code === -1) return null; // clean exit or killed by a signal
-    if (/LOGON_FAILURE|ACCESS_DENIED|0x00020014/.test(log))
-        return { title: "Windows rejected the login", message: `Windows rejected the password for ${winUser(cfg)}. Run "dinghy login" to save the right one.` };
+    if (/ERRCONNECT_LOGON_FAILURE|0x00020014/.test(log))
+        return { title: "Windows rejected the login", message: `Windows rejected the password for ${winUser(cfg)}. Run "dinghy fix login" to reset it, or "dinghy login" to enter the right one.` };
+    if (/ERRCONNECT_ACCESS_DENIED|0x00020016|authorization result/.test(log))
+        return { title: "Not allowed to use Remote Desktop", message: `${winUser(cfg)} signed in but isn't allowed to log on over Remote Desktop. Run: dinghy fix login` };
     if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(log))
         return { title: "Windows ended the session", message: `If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.` };
     if (/0x1807|CREDSSP|SECURITY/i.test(log))
@@ -1092,7 +1094,9 @@ async function vmCreate(cfg, args) {
     const password = randomPassword();
     if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
     VM.createDisk(cfg, gb);
-    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT, imageIndex: edition.index, virtioIso: virtio });
+    const productKey = opt("--key", null) ?? VM.genericKey(edition);
+    if (productKey) say(`    product key: ${opt("--key", null) ? "yours" : "Microsoft's generic install key (installs unactivated)"}`);
+    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT, imageIndex: edition.index, virtioIso: virtio, productKey });
     const { server } = startSetupServer(cfg, "127.0.0.1", false, false, `http://10.0.2.2:${SETUP_PORT}`);
     try {
         VM.start(cfg, { windows: iso, unattend, virtio }, { ramMB, cpus });
@@ -1280,7 +1284,7 @@ async function cmdSetup(cfg, args) {
         const r = G.ps(vm.name, [
             `$u='${user}'; $p=ConvertTo-SecureString '${pw}' -AsPlainText -Force`,
             `if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) { Set-LocalUser -Name $u -Password $p } else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName 'WinDinghy apps' | Out-Null }`,
-            `foreach ($g in 'Remote Desktop Users','Administrators') { Add-LocalGroupMember -Group $g -Member $u -ErrorAction SilentlyContinue }`,
+            `foreach ($g in 'Remote Desktop Users','Administrators') { net localgroup $g "$env:COMPUTERNAME\\$u" /add | Out-Null }`,
             `'account ready'`,
         ].join("; "), { secret: true });
         if (!/account ready/.test(r.output)) throw new Error(`Couldn't create the account:\n${r.output}`);
@@ -1337,7 +1341,7 @@ async function cmdFix(cfg, args) {
         return;
     }
     const which = args[0] && !args[0].startsWith("-") ? args[0] : "all";
-    const valid = ["all", "session", "rdp", "clock", "server"];
+    const valid = ["all", "session", "rdp", "clock", "server", "login"];
     if (!valid.includes(which)) throw new Error(`Usage: dinghy fix [${valid.join("|")}]`);
     if (!G.utmInstalled()) throw new Error("UTM isn't installed.");
     const vm = chooseVm(cfg).name;
@@ -1370,6 +1374,24 @@ async function cmdFix(cfg, args) {
             say(`    ${/ok$/.test(r.output) ? "done" : r.output}`);
             fixed++;
         }
+    }
+    if (which === "login") {
+        // Repair the Windows account WinDinghy signs in with: group membership (qualified with the
+        // computer name, see vm.mjs) and a fresh random password saved to the Keychain.
+        const user = winUser(cfg).split("\\").pop();
+        if (!user) throw new Error("No Windows username is configured (dinghy config username <name>).");
+        const pw = randomPassword();
+        stepSay(`Repairing the Windows account ${user}`);
+        const r = G.ps(vm, [
+            `$u='${user}'; $p=ConvertTo-SecureString '${pw}' -AsPlainText -Force`,
+            `if (Get-LocalUser -Name $u -ErrorAction SilentlyContinue) { Set-LocalUser -Name $u -Password $p } else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName 'WinDinghy apps' | Out-Null }`,
+            `foreach ($g in 'Administrators','Remote Desktop Users') { net localgroup $g "$env:COMPUTERNAME\\$u" /add 2>&1 | Out-Null }`,
+            `'account repaired'`,
+        ].join("; "), { secret: true });
+        if (!/account repaired/.test(r.output)) throw new Error(`Couldn't repair the account:\n${r.output}`);
+        if (!keychainSet(winUser(cfg), pw)) throw new Error("Repaired the account but couldn't save the password to the Keychain.");
+        say("    done; the new password is in your Keychain");
+        fixed++;
     }
     if (all || which === "session") {
         const id = consoleSessionId(cfg, vm);
