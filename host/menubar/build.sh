@@ -55,4 +55,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 codesign --force -s - "$APP" 2>/dev/null || true
+# A rebuilt bundle keeps its path but changes contents, and Launch Services can keep serving the old
+# (or a generic) icon. Re-register it and bump the folder's modification time.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
+touch "$APP"
 echo "Done. Launch with: open '$APP'"
