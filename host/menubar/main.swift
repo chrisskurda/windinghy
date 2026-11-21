@@ -11,6 +11,8 @@ struct WBConfig {
     var rdpPort = 3389
     var vmName = "Windows"
     var vmBackend = "utm"   // utm | qemu (the VM WinDinghy manages itself)
+    var advanced = "off"       // on: unsupported setups (UTM, remote hosts, ...) are allowed
+    var menubarIcon = "boat"   // boat (the WinDinghy dinghy) | symbol (the original window symbol)
     var username = ""
     var promptcreds = "on"
     var appsDir = NSString(string: "~/Applications/WinDinghy").expandingTildeInPath
@@ -26,6 +28,8 @@ struct WBConfig {
         if let v = json["rdpPort"] as? Int { c.rdpPort = v }
         if let v = json["vmName"] as? String, !v.isEmpty { c.vmName = v }
         if let v = json["vmBackend"] as? String, !v.isEmpty { c.vmBackend = v }
+        if let v = json["menubarIcon"] as? String, !v.isEmpty { c.menubarIcon = v }
+        if let v = json["advanced"] as? String, !v.isEmpty { c.advanced = v }
         if let v = json["username"] as? String { c.username = v }
         if let v = json["promptcreds"] as? String, !v.isEmpty { c.promptcreds = v }
         if let v = json["appsDir"] as? String, !v.isEmpty { c.appsDir = v }
@@ -214,20 +218,172 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var searchItem: NSMenuItem?
     var currentAppItems: [NSMenuItem] = []
     var lastDiscover = Date.distantPast
+    var snapshotNames: [String] = []
     var discovering = false
+
+    // ---------- managed VM tools (Windows VM submenu) ----------
+
+    // Runs `dinghy <args>` and hands back everything it printed.
+    func runDinghyCapture(_ args: [String], done: @escaping (Int32, String) -> Void) {
+        guard let node = findNode(), let dinghy = findDinghy() else { return }
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: node)
+            p.arguments = [dinghy] + args
+            let pipe = Pipe()
+            p.standardOutput = pipe; p.standardError = Pipe()
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            p.environment = env
+            do { try p.run() } catch { DispatchQueue.main.async { done(1, "") }; return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            DispatchQueue.main.async { done(p.terminationStatus, String(data: data, encoding: .utf8) ?? "") }
+        }
+    }
+
+    func refreshSnapshots() {
+        guard cfg.vmBackend == "qemu" else { snapshotNames = []; return }
+        runDinghyCapture(["vm", "snapshots"]) { [weak self] status, text in
+            guard status == 0 else { return }
+            // "name   date" per line; the "No snapshots yet" hint has no tab-aligned name
+            self?.snapshotNames = text.split(separator: "\n")
+                .filter { !$0.hasPrefix("No snapshots") }
+                .compactMap { $0.split(separator: " ").first.map(String.init) }
+        }
+    }
+
+    @objc func stopVM() {
+        notify("Shutting the WinDinghy VM down…")
+        runDinghyBackground(["vm", "stop"]) { [weak self] status, last in
+            self?.notify(status == 0 ? "The WinDinghy VM is stopped." : "Couldn't stop the VM: \(last)")
+            self?.poll()
+        }
+    }
+
+    @objc func takeSnapshot() {
+        let alert = NSAlert()
+        alert.messageText = "Take a snapshot"
+        alert.informativeText = "Windows is shut down briefly so the snapshot is consistent, then restarted. Name it (letters, digits, . _ -), or leave blank for a dated name."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "before-office-update"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Take Snapshot")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        runDinghyWindow(title: "Take Snapshot", args: name.isEmpty ? ["vm", "snapshot"] : ["vm", "snapshot", name])
+    }
+
+    @objc func rewindToSnapshot(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        runDinghyWindow(title: "Rewind to \(name)", args: ["vm", "rewind", name])   // dinghy asks to confirm
+    }
+
+    @objc func openVMFolder() {
+        let dir = NSString(string: "~/Library/Application Support/WinDinghy/vm").expandingTildeInPath
+        NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+    }
+
+    @objc func toggleAdvanced() {
+        if cfg.advanced != "on" {
+            let alert = NSAlert()
+            alert.messageText = "Turn on advanced mode?"
+            alert.informativeText = "Advanced mode unlocks setups WinDinghy doesn't support: UTM or another hypervisor, a Windows VM on another machine, a custom RDP client. They may work, and you're on your own if they don't.\n\nDon't point WinDinghy at a remote machine over the internet or an untrusted network unless it's inside an encrypted VPN (WireGuard, Tailscale, …): the guest API is plain HTTP."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Turn On")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            WBConfig.update("advanced", "on")
+        } else {
+            WBConfig.update("advanced", "off")
+        }
+        cfg = WBConfig.load()
+    }
+
+    func vmToolsMenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Windows VM", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.addItem(makeItem("Start", #selector(startVM), "", enabled: !online))
+        sub.addItem(makeItem("Stop", #selector(stopVM), "", enabled: online))
+        sub.addItem(makeItem("Restart", #selector(restartVM), ""))
+        sub.addItem(.separator())
+        sub.addItem(makeItem("Take Snapshot…", #selector(takeSnapshot), ""))
+        let rewind = NSMenuItem(title: "Rewind To", action: nil, keyEquivalent: "")
+        let rsub = NSMenu()
+        if snapshotNames.isEmpty {
+            let none = NSMenuItem(title: "No snapshots yet", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            rsub.addItem(none)
+        } else {
+            for name in snapshotNames {
+                let item = NSMenuItem(title: name, action: #selector(rewindToSnapshot(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = name
+                rsub.addItem(item)
+            }
+        }
+        rewind.submenu = rsub
+        sub.addItem(rewind)
+        sub.addItem(.separator())
+        sub.addItem(makeItem("Show VM Folder", #selector(openVMFolder), ""))
+        parent.submenu = sub
+        return parent
+    }
+
+    func advancedMenuItem() -> NSMenuItem {
+        let item = makeItem("Advanced Mode", #selector(toggleAdvanced), "")
+        item.state = cfg.advanced == "on" ? .on : .off
+        return item
+    }
+
+    // The menu-bar glyph: the WinDinghy dinghy (a template image, so macOS tints it for light/dark),
+    // or the original window symbol. Chosen from the menu, stored as "menubarIcon" in config.json.
+    func applyMenubarIcon() {
+        guard let btn = statusItem.button else { return }
+        var img: NSImage?
+        if cfg.menubarIcon != "symbol",
+           let path = Bundle.main.path(forResource: "menubar-icon", ofType: "svg"),
+           let boat = NSImage(contentsOfFile: path) {
+            boat.size = NSSize(width: 18, height: 18)
+            img = boat
+        }
+        // Fallback chain: symbol names vary across macOS versions, and a bad name silently
+        // yields nil (invisible icon).
+        img = img ?? NSImage(systemSymbolName: "macwindow.on.rectangle", accessibilityDescription: "WinDinghy")
+            ?? NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "WinDinghy")
+            ?? NSImage(named: NSImage.computerName)
+        img?.isTemplate = true
+        btn.image = img
+        btn.imagePosition = .imageLeft
+    }
+
+    @objc func chooseMenubarIcon(_ sender: NSMenuItem) {
+        let choice = sender.representedObject as? String ?? "boat"
+        WBConfig.update("menubarIcon", choice)
+        cfg = WBConfig.load()
+        applyMenubarIcon()
+    }
+
+    func menubarIconMenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "Menu Bar Icon", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for (title, value) in [("WinDinghy Dinghy", "boat"), ("Window Symbol", "symbol")] {
+            let item = NSMenuItem(title: title, action: #selector(chooseMenubarIcon(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = value
+            item.state = cfg.menubarIcon == value ? .on : .off
+            sub.addItem(item)
+        }
+        parent.submenu = sub
+        return parent
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let btn = statusItem.button {
-            // Fallback chain: symbol names vary across macOS versions, and a
-            // bad name silently yields nil (invisible icon).
-            let img = NSImage(systemSymbolName: "macwindow.on.rectangle", accessibilityDescription: "WinDinghy")
-                ?? NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "WinDinghy")
-                ?? NSImage(named: NSImage.computerName)
-            img?.isTemplate = true
-            btn.image = img
-            btn.imagePosition = .imageLeft
-        }
+        applyMenubarIcon()
         menu.delegate = self
         statusItem.menu = menu
         poll()
@@ -259,6 +415,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
 
     func poll() {
         cfg = WBConfig.load()  // pick up dinghy's self-repaired host
+        refreshSnapshots()
         fetchJSON("/health") { [weak self] health in
             guard let self else { return }
             self.online = health?["status"] as? String == "ok"
@@ -491,6 +648,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             menu.addItem(makeItem("Fix Problems…", #selector(showFix), ""))
         }
         menu.addItem(makeItem(updating ? "Checking for Updates…" : "Check for Updates…", #selector(checkForUpdates), "", enabled: !updating))
+        if cfg.vmBackend == "qemu" { menu.addItem(vmToolsMenuItem()) }
+        menu.addItem(menubarIconMenuItem())
+        menu.addItem(advancedMenuItem())
         let login = makeItem("Start at Login", #selector(toggleLogin), "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)

@@ -95,8 +95,21 @@ bumps may include breaking changes).
   "Setup Check…" with an Open App Management button, and the flows that need it open the
   Settings pane and continue automatically once the switch is on.
 
+- **Advanced mode** (`dinghy config advanced on`, or the menu-bar toggle): UTM or another hypervisor,
+  manual guest setup, a custom RDP client or any non-local host are unsupported and need it; a
+  non-local host gets the encrypted-VPN warning (also flagged by `dinghy doctor`). The managed VM is
+  the supported setup; without advanced mode `dinghy setup` builds one.
+- **Snapshots** for the managed VM: `dinghy vm snapshot [name]`, `snapshots`, `rewind <name>`,
+  `snapshot-delete <name>` (disk state plus the UEFI variables; Windows is shut down cleanly through
+  the guest agent first). `vm create` saves a `clean-install` baseline.
+- Menu bar: a **Windows VM** submenu (Start/Stop/Restart, Take Snapshot…, Rewind To, Show VM Folder),
+  an **Advanced Mode** toggle, and a **Menu Bar Icon** choice (the new dinghy glyph, or the original
+  window symbol). The new app icon and glyph are in `host/menubar` (`make-icon.sh` rebuilds the .icns).
+
 ### Fixed
 
+- Stopping the managed VM now asks Windows to shut down through the guest agent (the ACPI power-button
+  press does nothing at the lock screen).
 - `dinghy setup` works for the managed (QEMU) VM and on a clean slate: it no longer assumes UTM
   (no "set the network to Shared Network" error), and with no UTM and no VM it simply builds a
   WinDinghy VM. Setup's own web server is now served while the guest call runs (the call used to

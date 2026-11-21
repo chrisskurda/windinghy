@@ -1,5 +1,32 @@
 # WinDinghy roadmap
 
+## Product decisions (Nov 2026)
+
+- **The supported setup is the VM WinDinghy manages itself** (`dinghy vm create`: QEMU on Apple's
+  hypervisor, retail Windows 11 ARM64). It is the first-class path and the default for new users.
+  Anything else (UTM or another hypervisor, a VM on another machine, a custom RDP client) may work
+  but is unsupported and lives behind **advanced mode** (`dinghy config advanced on`, or the menu-bar
+  toggle). Pointing WinDinghy at a non-local machine without an encrypted VPN (WireGuard, Tailscale,
+  ...) is discouraged: the guest API is plain HTTP. Encrypted remote support is planned (below).
+- **Hypervisor management is WinDinghy's job**, hidden from a typical user but reachable when something
+  needs fixing: install/verify QEMU, start/stop/restart the VM, snapshots with rewind (done), logs and
+  the VM folder (menu bar > Windows VM). Still to do: install and update QEMU automatically (or bundle it),
+  idle auto-stop/suspend to save battery, RAM/CPU/disk settings, move the VM to an external disk,
+  disk compaction, backups.
+- **Stock Windows only by default.** Stripped images (nano11/tiny11 style) break Windows Update, so they
+  are an advanced option via `dinghy vm create --iso <path>`, not a recommendation.
+- **Unity-style integration** (as Parallels and VMware Fusion had):
+  - *Per-app Dock identity.* Windows allows one live session per user, so all apps share one RDP
+    connection and today the newest client's Dock icon represents every window. Design: one long-lived
+    client per VM (new apps are launched over the existing connection with RAIL exec through a control
+    socket) plus small stub apps that own each app's Dock icon, name and menu and forward activation to
+    the right windows.
+  - *A Start button / widget.* A Windows-style launcher: a menu-bar popover or floating panel with search,
+    pinned and recent apps, a list of running apps and their windows, Windows Desktop, and VM controls.
+  - Optional: Dock stack for the apps folder, Spotlight actions, Mission Control grouping.
+- **Menu-bar icon:** the new dinghy glyph (a template image) is the default; the original window symbol
+  stays available (menu bar > Menu Bar Icon).
+
 ## Next (tuning the native client)
 - Per-app Dock icons/names (bundle-local client copy; verify on macOS).
 - Show connection errors as native notifications instead of FreeRDP's unscaled dialogs (done).

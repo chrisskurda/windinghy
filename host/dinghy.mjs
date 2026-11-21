@@ -5,7 +5,7 @@
 // launchers that open as RemoteApp windows via Microsoft's "Windows App".
 //
 // Commands:
-//   dinghy vm <create|start|stop|status|screenshot|use|destroy>  the VM WinDinghy manages itself (QEMU, no UTM)
+//   dinghy vm <create|start|stop|status|snapshot|snapshots|rewind|snapshot-delete|screenshot|use|destroy>  the VM WinDinghy manages itself (QEMU, no UTM)
 //   dinghy setup                hands-free setup via the UTM guest agent (falls back to serve-setup)
 //   dinghy fix [session|rdp|clock|server|login]  repair common guest problems via the guest agent
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
@@ -49,6 +49,7 @@ const DEFAULTS = {
     scale: "",
     promptcreds: "on",
     vmName: "Windows",
+    advanced: "off",     // on: unlock unsupported setups (UTM or another hypervisor, remote hosts, custom clients)
     vmBackend: "utm",    // utm (a VM you run in UTM) or qemu (the VM WinDinghy manages: dinghy vm create)
     vmDir: "",           // where the managed VM lives (default ~/Library/Application Support/WinDinghy/vm)
     vmMac: "",           // learned automatically: the VM's MAC, used to find it when its IP changes
@@ -157,6 +158,25 @@ function saveConfig(cfg) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
 }
+
+// ---------- advanced mode ----------
+// The supported setup is the VM WinDinghy manages itself (dinghy vm create). Anything else (UTM or
+// another hypervisor, a VM on another machine, a custom RDP client) may work but is unsupported and
+// lives behind advanced mode.
+
+const isAdvanced = cfg => cfg.advanced === "on";
+
+function needAdvanced(cfg, what) {
+    if (isAdvanced(cfg)) return;
+    throw new Error(`${what} is an advanced option and isn't supported. WinDinghy's supported setup is the VM it manages itself (dinghy vm create). If you know what you're doing: dinghy config advanced on`);
+}
+
+// Local = this Mac (the managed VM) or UTM's private bridge. Anything else is another machine.
+function isLocalHost(h) {
+    return /^(127\.|localhost$|::1$|192\.168\.64\.)/i.test(String(h ?? ""));
+}
+
+const REMOTE_WARNING = "This host isn't on this Mac. The guest API is plain HTTP and the connection is only as private as the network it crosses: don't use it over the internet or untrusted networks unless it's inside an encrypted VPN (WireGuard, Tailscale, ...). Encrypted remote support is on the roadmap.";
 
 // ---------- guest API ----------
 
@@ -966,6 +986,8 @@ async function cmdDoctor(cfg) {
     }
     add(probeAppManagement(cfg), "App Management permission (lets WinDinghy update app launchers)",
         "Turn on WinDinghy in System Settings > Privacy & Security > App Management, or run: dinghy permissions --prompt");
+    if (isAdvanced(cfg)) add(true, "advanced mode is ON (unsupported setups allowed)", "");
+    if (!isLocalHost(cfg.host)) add(false, `host ${cfg.host} is not on this Mac`, REMOTE_WARNING);
     add(fs.existsSync(path.join(PROJECT_ROOT, "host", "dinghy-update.sh")), "updater available",
         "This checkout is missing host/dinghy-update.sh — re-clone the repo.");
     const launcherCount = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")).length : 0;
@@ -1258,6 +1280,7 @@ async function vmCreate(cfg, args) {
     G.ps(VM.VM_NAME, "Stop-Computer -Force", { timeout: 30000 });
     for (let i = 0; i < 60 && VM.isRunning(cfg); i++) await new Promise(r => setTimeout(r, 2000));
     VM.stop(cfg, 5);
+    try { VM.snapshotCreate(cfg, "clean-install"); say("    snapshot \"clean-install\" saved (rewind any time: dinghy vm rewind clean-install)"); } catch (e) { say(`    (couldn't save the baseline snapshot: ${e.message})`); }
     VM.start(cfg, {}, { ramMB, cpus });
     if (!await waitFor(() => guestApiUp(cfg), 300, 5000)) throw new Error("The VM didn't come back after the restart. Try: dinghy vm start");
 
@@ -1286,6 +1309,8 @@ async function cmdVm(cfg, args) {
             say(`WinDinghy VM: ${VM.isRunning(cfg) ? `running (pid ${VM.pidOf(cfg)})` : "stopped"}`);
             say(`disk: ${f.disk} (${(size / 1e9).toFixed(1)} GB used)`);
             say(`active backend: ${cfg.vmBackend || "utm"}; RDP 127.0.0.1:${VM.RDP_PORT}, guest API 127.0.0.1:${VM.API_PORT}`);
+            const snaps = VM.snapshotList(cfg);
+            say(`snapshots: ${snaps.length ? snaps.map(x => x.name).join(", ") : "none (dinghy vm snapshot)"}`);
             return;
         }
         case "screenshot": {
@@ -1293,9 +1318,52 @@ async function cmdVm(cfg, args) {
             if (!file) throw new Error("Couldn't take a screenshot (is the VM running?).");
             say(file); spawnSync("open", [file]); return;
         }
+        case "snapshot": {
+            if (!VM.exists(cfg)) throw new Error("No WinDinghy VM yet. Create it with: dinghy vm create");
+            const name = args[1] ?? `snap-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "").replace(/^(\d{8})(\d{4})$/, "$1-$2")}`;
+            if (!VM.validSnapshotName(name)) throw new Error("Snapshot names may use letters, digits, '.', '_' and '-' (up to 40 characters).");
+            const wasRunning = VM.isRunning(cfg);
+            if (wasRunning) { say("Shutting Windows down to take a consistent snapshot..."); if (!VM.stop(cfg, 120)) throw new Error("Couldn't stop the VM."); }
+            VM.snapshotCreate(cfg, name);
+            say(`Snapshot "${name}" taken.`);
+            if (wasRunning) { VM.start(cfg); say("Restarting the VM..."); await waitFor(() => guestApiUp(cfg), 300, 4000); }
+            return;
+        }
+        case "snapshots": {
+            const list = VM.snapshotList(cfg);
+            if (!list.length) { say("No snapshots yet. Take one with: dinghy vm snapshot [name]"); return; }
+            for (const x of list) say(`${x.name.padEnd(24)} ${new Date(x.date).toLocaleString()}`);
+            return;
+        }
+        case "rewind": {
+            const name = args[1];
+            if (!name) throw new Error("Usage: dinghy vm rewind <snapshot>   (see: dinghy vm snapshots)");
+            if (!VM.snapshotList(cfg).some(x => x.name === name)) throw new Error(`There's no snapshot named "${name}".`);
+            // Rewinding discards everything done in Windows since the snapshot: confirm.
+            if (!args.includes("--yes")) {
+                const ok = asDialog(`button returned of (display dialog "Rewind Windows to \"${asq(name)}\"?\n\nEverything changed in Windows since then (files, installed programs, settings) will be lost." with title "WinDinghy" with icon caution buttons {"Cancel", "Rewind"} default button "Cancel")`);
+                if (ok !== "Rewind") { say("Cancelled."); return; }
+            }
+            const wasRunning = VM.isRunning(cfg);
+            if (wasRunning) { VM.stop(cfg, 20); }
+            VM.snapshotApply(cfg, name);
+            say(`Rewound to "${name}".`);
+            if (wasRunning) { VM.start(cfg); say("Restarting the VM..."); await waitFor(() => guestApiUp(cfg), 300, 4000); }
+            return;
+        }
+        case "snapshot-delete": {
+            if (!args[1]) throw new Error("Usage: dinghy vm snapshot-delete <snapshot>");
+            const wasRunning = VM.isRunning(cfg);
+            if (wasRunning) { if (!VM.stop(cfg, 120)) throw new Error("Couldn't stop the VM."); }
+            VM.snapshotDelete(cfg, args[1]);
+            say(`Deleted snapshot "${args[1]}".`);
+            if (wasRunning) { VM.start(cfg); await waitFor(() => guestApiUp(cfg), 300, 4000); }
+            return;
+        }
         case "use": {
             const to = args[1];
             if (!["utm", "qemu"].includes(to)) throw new Error("Usage: dinghy vm use <utm|qemu>");
+            if (to === "utm") needAdvanced(cfg, "Using a UTM VM");
             switchBackend(cfg, to);
             say(`Now using the ${to} backend (host ${cfg.host}).`);
             return;
@@ -1307,7 +1375,7 @@ async function cmdVm(cfg, args) {
             say("Deleted.");
             return;
         default:
-            throw new Error("Usage: dinghy vm <create|start|stop|status|screenshot|use|destroy>");
+            throw new Error("Usage: dinghy vm <create|start|stop|status|snapshot|snapshots|rewind|snapshot-delete|screenshot|use|destroy>");
     }
 }
 
@@ -1378,6 +1446,10 @@ async function cmdSetup(cfg, args) {
     let noBanner = args.includes("--no-banner") || cfg.suppressBanner === "on";
     const qemu = isQemu(cfg);
     // Clean slate (no UTM, no managed VM yet): build a WinDinghy VM instead of asking for UTM.
+    if (!qemu && !isAdvanced(cfg)) {
+        say("UTM VMs are an advanced, unsupported option: creating a WinDinghy VM instead (enable advanced mode with: dinghy config advanced on).");
+        return vmCreate(cfg, args);
+    }
     if (qemu ? !VM.exists(cfg) : !G.utmInstalled()) {
         say(qemu ? "There's no WinDinghy VM yet: creating one." : "UTM isn't installed: creating a WinDinghy VM instead (it doesn't need UTM).");
         return vmCreate(cfg, args);
@@ -1584,6 +1656,9 @@ function cmdUpdate() {
     process.exit(r.status ?? 1);
 }
 
+// Settings that point WinDinghy at something other than its own managed VM.
+const ADVANCED_KEYS = ["host", "apiPort", "rdpPort", "client", "nativeBin", "vmBackend"];
+
 function cmdConfig(cfg, key, value) {
     if (!key) {
         console.log(JSON.stringify(cfg, null, 2));
@@ -1595,9 +1670,15 @@ function cmdConfig(cfg, key, value) {
         console.log(cfg[key]);
         return;
     }
+    if (ADVANCED_KEYS.includes(key)) needAdvanced(cfg, `Changing "${key}"`);
     cfg[key] = /^\d+$/.test(value) && key.endsWith("Port") ? Number(value) : value;
     saveConfig(cfg);
     console.log(`${key} = ${cfg[key]}`);
+    if (key === "advanced" && value === "on") {
+        console.log("\nAdvanced mode is on. Other setups (UTM or another hypervisor, a VM on another machine, a custom client) are unsupported:");
+        console.log("they may work, and you're on your own if they don't. " + REMOTE_WARNING);
+    }
+    if (key === "host" && !isLocalHost(cfg.host)) console.log("\nWARNING: " + REMOTE_WARNING);
 }
 
 // ---------- main ----------
@@ -1608,7 +1689,7 @@ G.useBackend(cfg);
 
 try {
     switch (cmd) {
-        case "serve-setup": await cmdServeSetup(cfg, rest.includes("--json"), rest.includes("--no-banner")); break;
+        case "serve-setup": needAdvanced(cfg, "Manual guest setup (serve-setup)"); await cmdServeSetup(cfg, rest.includes("--json"), rest.includes("--no-banner")); break;
         case "status":      await findGuest(cfg); await cmdStatus(cfg); break;
         case "sync":        await findGuest(cfg); await cmdSync(cfg); break;
         case "discover":    await cmdDiscover(cfg, rest.includes("--quiet")); break;

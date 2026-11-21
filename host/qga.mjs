@@ -104,6 +104,10 @@ try {
         const ifs = await agent.call("guest-network-get-interfaces", {});
         for (const i of ifs) for (const a of i["ip-addresses"] ?? [])
             if (a["ip-address-type"] === "ipv4" && !a["ip-address"].startsWith("127.") && !a["ip-address"].startsWith("169.254.")) console.log(a["ip-address"]);
+    } else if (cmd === "shutdown") {
+        // The guest powers off without answering, so don't wait for a reply.
+        agent.s.write(JSON.stringify({ execute: "guest-shutdown", arguments: { mode: "powerdown" } }) + "\n");
+        await new Promise(r => setTimeout(r, 1500));
     } else if (cmd === "exec") {
         const [timeoutSec, path, ...rest] = args;
         const input = readStdin();

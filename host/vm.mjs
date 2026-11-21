@@ -173,11 +173,13 @@ export function start(cfg, media = {}, opts = {}) {
     return true;
 }
 
-// Graceful shutdown through ACPI, then force.
+// Graceful shutdown: ask Windows through the guest agent (an ACPI power-button press does nothing
+// at the lock screen), fall back to ACPI, then force.
 export function stop(cfg, waitSec = 60) {
     const pid = pidOf(cfg);
     if (!pid) return true;
-    qmp(cfg, "system_powerdown");
+    const asked = spawnSync(process.execPath, [QGA, files(cfg).qga, "shutdown"], { timeout: 15000 }).status === 0;
+    if (!asked) qmp(cfg, "system_powerdown");
     const end = Date.now() + waitSec * 1000;
     while (Date.now() < end) {
         if (!pidOf(cfg)) return true;
@@ -187,6 +189,54 @@ export function stop(cfg, waitSec = 60) {
     spawnSync("sleep", ["1"]);
     if (pidOf(cfg)) { try { process.kill(pid, "SIGKILL"); } catch {} }
     return !pidOf(cfg);
+}
+
+// ---------- snapshots (qcow2 internal snapshots; the VM must be stopped) ----------
+// A snapshot is the disk state plus a copy of the UEFI variables (boot entries), so rewinding
+// brings both back. Names are restricted to something safe to put on a command line.
+
+export function validSnapshotName(n) { return /^[A-Za-z0-9._-]{1,40}$/.test(String(n ?? "")); }
+
+function snapVars(cfg, name) { return path.join(files(cfg).dir, "snapshots", `${name}.vars`); }
+
+export function snapshotList(cfg) {
+    const f = files(cfg);
+    const r = spawnSync(tools().img, ["info", "--output=json", "-U", f.disk], { encoding: "utf8" });
+    if (r.status !== 0) return [];
+    try {
+        return (JSON.parse(r.stdout).snapshots ?? []).map(x => ({ name: x.name, date: (x["date-sec"] ?? 0) * 1000, id: x.id }));
+    } catch { return []; }
+}
+
+function needStopped(cfg) {
+    if (isRunning(cfg)) throw new Error("The VM must be stopped for this (dinghy vm snapshot / rewind do that for you).");
+}
+
+export function snapshotCreate(cfg, name) {
+    if (!validSnapshotName(name)) throw new Error("Snapshot names may use letters, digits, '.', '_' and '-' (up to 40 characters).");
+    needStopped(cfg);
+    const f = files(cfg);
+    if (snapshotList(cfg).some(x => x.name === name)) throw new Error(`A snapshot named "${name}" already exists.`);
+    const r = spawnSync(tools().img, ["snapshot", "-c", name, f.disk], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`Couldn't take the snapshot: ${(r.stderr || r.stdout).trim()}`);
+    fs.mkdirSync(path.dirname(snapVars(cfg, name)), { recursive: true });
+    fs.copyFileSync(f.vars, snapVars(cfg, name));
+}
+
+export function snapshotApply(cfg, name) {
+    needStopped(cfg);
+    const f = files(cfg);
+    if (!snapshotList(cfg).some(x => x.name === name)) throw new Error(`There's no snapshot named "${name}".`);
+    const r = spawnSync(tools().img, ["snapshot", "-a", name, f.disk], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`Couldn't rewind: ${(r.stderr || r.stdout).trim()}`);
+    if (fs.existsSync(snapVars(cfg, name))) fs.copyFileSync(snapVars(cfg, name), f.vars);
+}
+
+export function snapshotDelete(cfg, name) {
+    needStopped(cfg);
+    const r = spawnSync(tools().img, ["snapshot", "-d", name, files(cfg).disk], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`Couldn't delete the snapshot: ${(r.stderr || r.stdout).trim()}`);
+    fs.rmSync(snapVars(cfg, name), { force: true });
 }
 
 // ---------- creating the VM ----------

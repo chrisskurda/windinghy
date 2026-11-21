@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- WinDinghy menu-bar glyph (template image: one colour, macOS tints it). The dinghy from the app
+       icon: a four-pane window as the mainsail, a small jib, a mast and a curved hull. -->
+  <g fill="#000">
+    <!-- mainsail: four panes with window-gap -->
+    <rect x="13.2" y="3.2" width="3.7" height="5.6" rx="0.6"/>
+    <rect x="18.0" y="3.2" width="3.7" height="5.6" rx="0.6"/>
+    <rect x="13.2" y="9.8" width="3.7" height="5.6" rx="0.6"/>
+    <rect x="18.0" y="9.8" width="3.7" height="5.6" rx="0.6"/>
+    <!-- jib -->
+    <path d="M11.2 5.2 L11.2 15.4 L4.4 15.4 Z"/>
+    <!-- mast -->
+    <rect x="11.6" y="2.2" width="1.1" height="14.4" rx="0.55"/>
+    <!-- hull -->
+    <path d="M2.6 17.6 H21.4 C20.4 20.6 17.2 22.2 12 22.2 C6.8 22.2 3.6 20.6 2.6 17.6 Z"/>
+  </g>
+</svg>
