@@ -441,7 +441,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyMenubarIcon()
         AppStore.shared.delegate = self
-        if CommandLine.arguments.contains("--show-window") || ProcessInfo.processInfo.environment["WINDINGHY_SHOW_WINDOW"] == "1" {
+        // With no Windows installed the only useful thing to show is the setup wizard, so open the window
+        // instead of quietly adding a menu-bar icon (a first-time user would keep launching the app and
+        // waiting for a window).
+        AppStore.shared.refresh()
+        let noWindows = !AppStore.shared.vmExists
+        if noWindows || CommandLine.arguments.contains("--show-window") || ProcessInfo.processInfo.environment["WINDINGHY_SHOW_WINDOW"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.openMainWindow() }
         }
         menu.delegate = self
