@@ -576,11 +576,13 @@ struct SetupView: View {
                 }
                 HStack { Text("Windows account name"); Spacer()
                     TextField("", text: $store.setupUser).textFieldStyle(.roundedBorder).frame(width: 160).multilineTextAlignment(.trailing) }
+                HStack { Text("Windows password"); Spacer()
+                    SecureField("Generate one for me", text: $store.setupPassword).textFieldStyle(.roundedBorder).frame(width: 160).multilineTextAlignment(.trailing) }
                 HStack { Text("Edition"); Spacer(); Text("Windows 11 Pro · ARM64").foregroundStyle(.secondary) }
                 HStack { Text("Cores · Memory · Disk"); Spacer(); Text("\(store.cores) · \(store.ramGB) GB · \(store.diskGB) GB").foregroundStyle(.secondary) }
                 HStack { Text("VM location"); Spacer(); Text("Application Support").foregroundStyle(.secondary) }
             }
-            .formStyle(.grouped).frame(height: 230)
+            .formStyle(.grouped).frame(height: 270)
             Text("Windows needs Microsoft's installer. If it isn't in Downloads, WinDinghy opens Microsoft's download page and continues when the file arrives.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {

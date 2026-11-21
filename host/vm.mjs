@@ -427,7 +427,7 @@ ${c("Microsoft-Windows-Shell-Setup", "oobeSystem", `      <OOBE>
 
 // Runs once at first logon, from the answer-file CD. Installs drivers + guest agent, waits for the
 // Mac (10.0.2.2), then runs setup.ps1 (RDP, RemoteApp, guest server).
-export function firstLogonScript(setupPort, user, password) {
+export function firstLogonScript(setupPort, user, password, fullName = "") {
     return `$ErrorActionPreference = 'Continue'
 Start-Transcript -Path C:\\Windows\\Temp\\dinghy-firstlogon.log -Force | Out-Null
 # The virtio ISO: drivers (ARM64) and the guest agent. There is no ARM64 agent MSI; the x64 one runs
@@ -444,7 +444,7 @@ if ($root) {
 } else { Write-Host "virtio ISO not found" }
 # The account WinDinghy uses for RDP (this first logon runs as the built-in Administrator).
 $p = ConvertTo-SecureString '${password.replace(/'/g, "''")}' -AsPlainText -Force
-if (Get-LocalUser -Name '${user}' -ErrorAction SilentlyContinue) { Set-LocalUser -Name '${user}' -Password $p } else { New-LocalUser -Name '${user}' -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName 'WinDinghy apps' | Out-Null }
+if (Get-LocalUser -Name '${user}' -ErrorAction SilentlyContinue) { Set-LocalUser -Name '${user}' -Password $p } else { New-LocalUser -Name '${user}' -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName '${(fullName || user).replace(/'/g, "''")}' | Out-Null }
 # Qualify the member with the computer name: a bare name that equals the computer name resolves to the computer, not the user.
 $member = "$env:COMPUTERNAME\\${user}"
 foreach ($g in 'Administrators','Remote Desktop Users') { net localgroup $g $member /add | Out-Host }
@@ -458,6 +458,7 @@ if ($ok) {
     Set-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' AutoAdminLogon 0 -ErrorAction SilentlyContinue
     Disable-LocalUser -Name 'Administrator' -ErrorAction SilentlyContinue
 }
+Set-Content C:\\Windows\\Temp\\dinghy-firstlogon.done "ok=$ok"
 Stop-Transcript | Out-Null
 `;
 }
@@ -478,13 +479,13 @@ function stageWinPEDrivers(virtioIso, dest) {
 }
 
 // Build the answer-file CD (autounattend.xml + firstlogon.ps1) with macOS's hdiutil.
-export function buildUnattendIso(cfg, { user, password, setupPort, imageIndex = 1, virtioIso = null, productKey = null }) {
+export function buildUnattendIso(cfg, { user, fullName = "", password, setupPort, imageIndex = 1, virtioIso = null, productKey = null }) {
     const f = files(cfg);
     const stage = fs.mkdtempSync(path.join(os.tmpdir(), "dinghy-unattend-"));
     // (No $WinPEDriver$ folder: Setup's own driver injection of those packages fails with 0x80070103;
     //  the explicit drvload in autounattend.xml is enough to expose the install CD.)
     fs.writeFileSync(path.join(stage, "autounattend.xml"), unattendXml({ user, password, imageIndex, productKey }));
-    fs.writeFileSync(path.join(stage, "firstlogon.ps1"), firstLogonScript(setupPort, user, password));
+    fs.writeFileSync(path.join(stage, "firstlogon.ps1"), firstLogonScript(setupPort, user, password, fullName));
     fs.rmSync(f.unattend, { force: true });
     const r = spawnSync("hdiutil", ["makehybrid", "-iso", "-joliet", "-default-volume-name", "UNATTEND", "-o", f.unattend, stage], { encoding: "utf8" });
     fs.rmSync(stage, { recursive: true, force: true });

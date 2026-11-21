@@ -10,10 +10,16 @@ bumps may include breaking changes).
 
 ### Added
 
+- Windows sign-in controls (Account & Activation): see the current account, show or copy its password, change it or generate a new one, switch to another account or create one. CLI: `dinghy password show|set|random`, `dinghy user list|use <name> [--create] [--admin]`.
+- The setup window asks for a Windows password (blank generates one); the account's full name is your macOS name (`--fullname`).
+
+### Added
+
 - Reset & uninstall (Storage & Backup): rewind to the clean install, reinstall Windows (optional safety export first, same account and resources), or remove Windows from this Mac. CLI: `dinghy vm reinstall --yes [--backup <path>]`, `dinghy uninstall [--yes] [--purge-cache] [--purge-settings]`.
 
 ### Fixed
 
+- Windows Desktop (and the VM's own screen) no longer sign in as the built-in Administrator after a fresh install. Setup used to restart the VM as soon as the guest agent answered, cutting off the first-logon script before it retired the Administrator account and its auto-logon. Setup now waits for that script to finish, then disables the Administrator; `dinghy fix admin` repairs an existing VM.
 - Opening WinDinghy with no Windows installed now opens the window (the setup wizard) instead of only adding a menu-bar icon.
 - Removing Windows shows a progress bar, and afterwards the window offers only the setup wizard instead of settings that can't work without a VM. Without a managed VM, the window goes to setup unless advanced mode is on; a custom VM folder is honored.
 - Deleting a VM only removes the files WinDinghy created, so a custom VM folder that holds anything else is never wiped.

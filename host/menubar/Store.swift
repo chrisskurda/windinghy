@@ -156,6 +156,7 @@ final class AppStore: ObservableObject {
     // first-run setup
     @Published var setupPhase: SetupPhase? = nil
     @Published var setupUser: String = NSUserName().filter { $0.isLetter || $0.isNumber || "._- ".contains($0) }
+    @Published var setupPassword: String = ""   // empty = a random one (shown later in Account & Activation)
     @Published var setupISO: String? = nil   // nil = find in ~/Downloads
 
     static let debugSetup = CommandLine.arguments.contains { $0.hasPrefix("--setup=") }
@@ -430,7 +431,7 @@ final class AppStore: ObservableObject {
             : [dinghy, "vm", "create", "--progress"]
         reinstalling = false   // a retry after a failure must create, not reinstall (the old VM is already gone)
         args += [ "--disk", "\(diskGB)", "--ram", "\(ramGB * 1024)", "--cpus", "\(cores)"]
-        args += ["--user", setupUser.isEmpty ? "WinDinghy" : setupUser]
+        args += ["--user", setupUser.isEmpty ? "WinDinghy" : setupUser, "--fullname", NSFullUserName()]
         if allowUntested { args.append("--allow-untested") }
         if let iso = setupISO { args += ["--iso", iso] }
         let p = Process()
@@ -438,6 +439,7 @@ final class AppStore: ObservableObject {
         p.arguments = args
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        if !setupPassword.isEmpty { env["WINDINGHY_PASSWORD"] = setupPassword }
         p.environment = env
         let pipe = Pipe()
         p.standardOutput = pipe; p.standardError = pipe
@@ -465,6 +467,7 @@ final class AppStore: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if proc.terminationStatus == 0 {
+                    self.setupPassword = ""
                     self.refresh()
                     self.setupPhase = .done(apps: self.apps.count)
                 } else {

@@ -29,6 +29,72 @@ final class ToolsStore: ObservableObject {
     @Published var accountMessage: String? = nil
     @Published var accountBusy = false
 
+    // sign-in (Windows account)
+    @Published var shownPassword: String? = nil
+    @Published var newPassword = ""
+    @Published var signInMessage: String? = nil
+    @Published var signInBusy = false
+    @Published var accounts: [String] = []
+    @Published var otherUser = ""
+    @Published var otherPassword = ""
+    @Published var createOther = false
+    @Published var currentUser = ConfigFile.string("username", "")
+
+    func loadSignIn() {
+        currentUser = ConfigFile.string("username", "")
+        cli?.runDinghyCapture(["user", "list", "--json"]) { [weak self] status, text in
+            guard let self, status == 0, let a = self.json(text) as? [[String: Any]] else { return }
+            self.accounts = a.compactMap { $0["name"] as? String }
+        }
+    }
+
+    func revealPassword() {
+        if shownPassword != nil { shownPassword = nil; return }
+        cli?.runDinghyCapture(["password", "show"]) { [weak self] status, text in
+            self?.shownPassword = status == 0 ? text.trimmingCharacters(in: .whitespacesAndNewlines) : "(none saved)"
+        }
+    }
+
+    func copyPassword() {
+        cli?.runDinghyCapture(["password", "show"]) { status, text in
+            guard status == 0 else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text.trimmingCharacters(in: .whitespacesAndNewlines), forType: .string)
+        }
+    }
+
+    func changePassword(random: Bool) {
+        signInBusy = true; signInMessage = nil
+        let args = random ? ["password", "random"] : ["password", "set"]
+        let input = random ? nil : (try? JSONSerialization.data(withJSONObject: ["password": newPassword])).flatMap { String(data: $0, encoding: .utf8) }
+        cli?.runDinghyCapture(args, input: input) { [weak self] status, text in
+            guard let self else { return }
+            self.signInBusy = false
+            self.signInMessage = status == 0 ? "Password changed. It's saved in your Keychain." : "Windows didn't accept it: use at least 8 characters, and make sure Windows is running."
+            if status == 0 { self.newPassword = ""; self.shownPassword = nil }
+        }
+    }
+
+    func switchUser() {
+        signInBusy = true; signInMessage = nil
+        var args = ["user", "use", otherUser]
+        if createOther { args.append("--create") }
+        let body: [String: String] = ["password": otherPassword, "fullName": otherUser]
+        let input = (try? JSONSerialization.data(withJSONObject: body)).flatMap { String(data: $0, encoding: .utf8) }
+        cli?.runDinghyCapture(args, input: input) { [weak self] status, text in
+            guard let self else { return }
+            self.signInBusy = false
+            if status == 0 {
+                self.signInMessage = "Now signing in as \(self.otherUser). Apps switch on their next launch (close any open Windows apps first)."
+                self.otherPassword = ""; self.shownPassword = nil
+                self.loadSignIn()
+                AppStore.shared.refresh()
+            } else {
+                self.signInMessage = "Couldn't switch: " + (text.split(separator: "\n").last.map(String.init) ?? "check the name and password, and that Windows is running.")
+            }
+        }
+    }
+
     // work & school
     @Published var domainStatus: String? = nil
     @Published var domainJoined = false
@@ -335,6 +401,41 @@ struct AccountView: View {
     @EnvironmentObject var tools: ToolsStore
     var body: some View {
         Form {
+            Section {
+                HStack { Text("Signed in as"); Spacer(); Text(tools.currentUser).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary) }
+                HStack {
+                    Text("Password")
+                    Spacer()
+                    Text(tools.shownPassword ?? "••••••••••").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button(tools.shownPassword == nil ? "Show" : "Hide") { tools.revealPassword() }
+                    Button("Copy") { tools.copyPassword() }
+                }
+                HStack {
+                    SecureField("New password (8+ characters)", text: $tools.newPassword)
+                    Button("Change") { tools.changePassword(random: false) }.disabled(tools.signInBusy || tools.newPassword.count < 8)
+                    Button("Generate New") { tools.changePassword(random: true) }.disabled(tools.signInBusy)
+                }
+            } header: { Text("Windows sign-in") } footer: {
+                Text("WinDinghy signs in to Windows with this account and keeps its password in your Keychain. You'll need the password for the Windows lock screen and anything that asks for it.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            Section {
+                if tools.accounts.count > 1 {
+                    Picker("Use an existing account", selection: $tools.otherUser) {
+                        Text("Choose…").tag("")
+                        ForEach(tools.accounts.filter { $0 != tools.currentUser }, id: \.self) { Text($0).tag($0) }
+                    }
+                }
+                TextField("Account name", text: $tools.otherUser)
+                SecureField("Its password", text: $tools.otherPassword)
+                Toggle("Create this account in Windows", isOn: $tools.createOther)
+                HStack {
+                    Button("Switch to This Account") { tools.switchUser() }
+                        .disabled(tools.signInBusy || tools.otherUser.isEmpty || tools.otherPassword.count < 8)
+                    if tools.signInBusy { ProgressView().controlSize(.small) }
+                }
+                if let m = tools.signInMessage { Text(m).font(.system(size: 12)).foregroundStyle(.secondary) }
+            } header: { Text("Switch account") }
             Section("Activation") {
                 HStack {
                     StatusDot(ok: tools.activated == true)
@@ -357,7 +458,7 @@ struct AccountView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { tools.loadActivation() }
+        .onAppear { tools.loadActivation(); tools.loadSignIn() }
     }
 }
 

@@ -1283,6 +1283,18 @@ function cmdAbout(cfg, json) {
     say("\nNot affiliated with Microsoft or WinBoat. See NOTICE.md for credits and trademarks.");
 }
 
+
+// The built-in Administrator is only for the first logon. Stop auto-signing it in and disable it, so the
+// VM's own screen and Windows Desktop use the account the user chose.
+function retireAdministrator(vm) {
+    return G.ps(vm, [
+        `Set-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' AutoAdminLogon 0 -ErrorAction SilentlyContinue`,
+        `Remove-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' DefaultPassword -ErrorAction SilentlyContinue`,
+        `Disable-LocalUser -Name 'Administrator' -ErrorAction SilentlyContinue`,
+        `'admin retired'`,
+    ].join("; "), { timeout: 30000 }).output.includes("admin retired");
+}
+
 async function vmCreate(cfg, args) {
     const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
     // The app window reads these lines to draw its progress bar.
@@ -1320,14 +1332,16 @@ async function vmCreate(cfg, args) {
     stepSay("Preparing the VM");
     const user = opt("--user", "WinDinghy");
     if (!validWindowsUser(user)) throw new Error(`"${user}" can't be a Windows account name (up to 20 letters, numbers, spaces, dots, dashes or underscores; not a reserved name).`);
-    const password = randomPassword();
+    // The setup window can supply a password (WINDINGHY_PASSWORD keeps it off the command line); otherwise a random one.
+    const password = process.env.WINDINGHY_PASSWORD || randomPassword();
+    if (!strongEnough(password)) throw new Error("A Windows password needs at least 8 characters.");
     if (!keychainSet(user, password)) throw new Error("Couldn't save the VM's password to the Keychain.");
     cfg.vmCpus = cpus; cfg.vmRamGB = Math.max(1, Math.round(ramMB / 1024)); cfg.vmDiskGB = gb;
     saveConfig(cfg);
     VM.createDisk(cfg, gb);
     const productKey = opt("--key", null) ?? VM.genericKey(edition);
     if (productKey) say(`    product key: ${opt("--key", null) ? "yours" : "Microsoft's generic install key (installs unactivated)"}`);
-    const unattend = VM.buildUnattendIso(cfg, { user, password, setupPort: SETUP_PORT, imageIndex: edition.index, virtioIso: virtio, productKey });
+    const unattend = VM.buildUnattendIso(cfg, { user, fullName: opt("--fullname", user), password, setupPort: SETUP_PORT, imageIndex: edition.index, virtioIso: virtio, productKey });
     const { server } = startSetupServer(cfg, "127.0.0.1", false, false, `http://10.0.2.2:${SETUP_PORT}`);
     try {
         VM.start(cfg, { windows: iso, unattend, virtio }, { ramMB, cpus });
@@ -1356,6 +1370,12 @@ async function vmCreate(cfg, args) {
     stepSay("Finishing up");
     cfg.vmName = VM.VM_NAME;
     switchBackend(cfg, "qemu", { host: "127.0.0.1", rdpPort: VM.RDP_PORT, apiPort: VM.API_PORT, username: user, vmName: VM.VM_NAME, vmMac: "" });
+    // The guest API comes up part-way through the first-logon script. Restarting now would cut it off before
+    // it finishes setup and retires the built-in Administrator, so wait for its "done" marker.
+    say("    Waiting for Windows to finish its first-time setup...");
+    progress(92, "Finishing Windows setup…");
+    await waitFor(async () => /ok=/.test(G.ps(VM.VM_NAME, "Get-Content C:\\Windows\\Temp\\dinghy-firstlogon.done -ErrorAction SilentlyContinue", { timeout: 20000 }).output), 900, 10000);
+    retireAdministrator(VM.VM_NAME);
     say("    Restarting the VM without the install media...");
     G.ps(VM.VM_NAME, "Stop-Computer -Force", { timeout: 30000 });
     for (let i = 0; i < 60 && VM.isRunning(cfg); i++) await new Promise(r => setTimeout(r, 2000));
@@ -1455,6 +1475,68 @@ async function vmImport(cfg, src) {
     say("The Windows password isn't part of a bundle: run  dinghy login  to save it on this Mac.");
 }
 
+
+
+// ---------- the Windows sign-in: password and user ----------
+
+function readStdinJson() {
+    try { return JSON.parse(fs.readFileSync(0, "utf8") || "{}"); } catch { return {}; }
+}
+
+function strongEnough(pw) { return typeof pw === "string" && pw.length >= 8 && pw.length <= 127; }
+
+// dinghy password show | random | set   (set reads {"password": "..."} on stdin)
+async function cmdPassword(cfg, args) {
+    const sub = args[0] ?? "show";
+    const full = winUser(cfg), user = full.split("\\").pop();
+    if (!user) throw new Error("No Windows username is configured.");
+    if (sub === "show") {
+        const pw = keychainGet(full);
+        if (!pw) { process.exitCode = 1; say("No password is saved for this account."); return; }
+        say(pw);
+        return;
+    }
+    if (sub !== "set" && sub !== "random") throw new Error("Usage: dinghy password <show|set|random>");
+    const pw = sub === "random" ? randomPassword() : readStdinJson().password;
+    if (!strongEnough(pw)) throw new Error("A Windows password needs at least 8 characters.");
+    const vm = needAgent(cfg);
+    const r = G.ps(vm, `try { Set-LocalUser -Name '${psq(user)}' -Password (ConvertTo-SecureString '${psq(pw)}' -AsPlainText -Force) -ErrorAction Stop; 'password changed' } catch { 'FAILED: ' + $_.Exception.Message }`, { secret: true });
+    if (!/password changed/.test(r.output)) throw new Error(`Windows didn't accept it: ${r.output.trim().slice(0, 200)}`);
+    if (!keychainSet(full, pw)) throw new Error("Changed it in Windows but couldn't save it to the Keychain.");
+    say("Password changed and saved to your Keychain.");
+}
+
+// dinghy user list [--json] | use <name> [--create] [--admin]   (use reads {"password","fullName"} on stdin)
+async function cmdUser(cfg, args) {
+    const sub = args[0] ?? "list";
+    if (sub === "list") {
+        const vm = needAgent(cfg);
+        const res = psJson(cfg, `$u = @(Get-LocalUser | Where-Object { $_.Enabled -and $_.Name -notin @('Administrator','DefaultAccount','Guest','WDAGUtilityAccount') } | ForEach-Object { [pscustomobject]@{ name = $_.Name; fullName = $_.FullName } })\n"JSON:" + (ConvertTo-Json -InputObject $u -Compress)`.replace(/\n/g, "; "));
+        if (args.includes("--json")) console.log(JSON.stringify(res)); else for (const u of res) say(`${u.name}${u.fullName ? "  (" + u.fullName + ")" : ""}${u.name === winUser(cfg).split("\\").pop() ? "   <- in use" : ""}`);
+        return;
+    }
+    if (sub !== "use") throw new Error("Usage: dinghy user <list|use <name> [--create] [--admin]>");
+    const name = args[1];
+    if (!validWindowsUser(name)) throw new Error(`"${name ?? ""}" can't be a Windows account name.`);
+    const input = readStdinJson();
+    if (!strongEnough(input.password)) throw new Error("A Windows password needs at least 8 characters.");
+    const vm = needAgent(cfg);
+    const create = args.includes("--create"), admin = args.includes("--admin");
+    const fullName = String(input.fullName || name);
+    const script = [
+        `$u='${psq(name)}'; $p=ConvertTo-SecureString '${psq(input.password)}' -AsPlainText -Force; $exists=[bool](Get-LocalUser -Name $u -ErrorAction SilentlyContinue)`,
+        create
+            ? `if ($exists) { 'FAILED: an account with that name already exists' } else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires -FullName '${psq(fullName)}' | Out-Null; $exists=$true }`
+            : `if (-not $exists) { 'FAILED: there is no Windows account with that name (use Create)' }`,
+        `if ($exists) { net localgroup 'Remote Desktop Users' "$env:COMPUTERNAME\$u" /add 2>&1 | Out-Null; ${admin ? `net localgroup Administrators "$env:COMPUTERNAME\$u" /add 2>&1 | Out-Null; ` : ""}'account ready' }`,
+    ].join("; ");
+    const r = G.ps(vm, script, { secret: true });
+    if (!/account ready/.test(r.output)) throw new Error(r.output.trim().replace(/^FAILED: /, "").slice(0, 200) || "Couldn't set up that account.");
+    cfg.username = name;
+    saveConfig(cfg);
+    if (!keychainSet(winUser(cfg), input.password)) throw new Error("Set up the account but couldn't save its password to the Keychain.");
+    say(`WinDinghy now signs in to Windows as ${name}. Open apps will switch on their next launch.`);
+}
 
 // ---------- reinstall / uninstall ----------
 
@@ -2048,7 +2130,7 @@ async function cmdFix(cfg, args) {
         return;
     }
     const which = args[0] && !args[0].startsWith("-") ? args[0] : "all";
-    const valid = ["all", "session", "rdp", "clock", "server", "login"];
+    const valid = ["all", "session", "rdp", "clock", "server", "login", "admin"];
     if (!valid.includes(which)) throw new Error(`Usage: dinghy fix [${valid.join("|")}]`);
     if (!G.utmInstalled()) throw new Error(isQemu(cfg) ? "QEMU isn't installed (brew install qemu)." : "UTM isn't installed.");
     const vm = chooseVm(cfg).name;
@@ -2082,6 +2164,13 @@ async function cmdFix(cfg, args) {
             say(`    ${/ok$/.test(r.output) ? "done" : r.output}`);
             fixed++;
         }
+    }
+    if (all || which === "admin") {
+        const u = winUser(cfg).split("\\").pop();
+        if (u && u.toLowerCase() !== "administrator") {
+            stepSay("Retiring the built-in Administrator account");
+            if (retireAdministrator(vm)) { say("    done"); fixed++; } else say("    couldn't do it; try again with Windows running");
+        } else if (!all) say("You sign in as Administrator, so it stays enabled.");
     }
     if (which === "login") {
         // Repair the Windows account WinDinghy signs in with: group membership (qualified with the
@@ -2205,6 +2294,8 @@ try {
         case "setup":       await cmdSetup(cfg, rest); break;
         case "vm":          await cmdVm(cfg, rest); break;
         case "uninstall":   await cmdUninstall(cfg, rest); break;
+        case "password":    await cmdPassword(cfg, rest); break;
+        case "user":        await cmdUser(cfg, rest); break;
         case "about":
         case "components":  cmdAbout(cfg, rest.includes("--json")); break;
         case "fix":         await cmdFix(cfg, rest); break;
@@ -2223,6 +2314,8 @@ Usage:
   dinghy doctor               check mac-side + guest-side requirements
   dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)
   dinghy update               pull the latest WinDinghy from git and rebuild
+  dinghy password <show|set|random>   the Windows account password (saved in your Keychain)
+  dinghy user <list|use <name> [--create] [--admin]>   which Windows account WinDinghy signs in as
   dinghy about                versions installed vs the tested versions
   dinghy pkg <search|list|install|uninstall|upgrade> ...   software via winget
   dinghy folders <status|on|off|ro|apply>   Mac folders as Windows folders; read-only shares

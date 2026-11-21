@@ -30,6 +30,8 @@ macOS asks for **App Management** permission so WinDinghy can update its app lau
 
 ## Account, activation, work
 
+- **Windows sign-in** (top of Account & Activation): the account WinDinghy uses, its password (Show/Copy/Change), and switching to or creating another account. The password lives in your Keychain; you need it for the Windows lock screen.
+
 - **Account & Activation** shows whether Windows is activated and takes a product key. The Microsoft account buttons open the matching Windows Settings page in a window. A Microsoft account is optional.
 - **Work & School** joins a domain (it must be reachable from the VM, which usually means the office network or a VPN on the Mac) or opens the work/school account settings. Windows restarts to finish a join. Domain policy can change Windows' clock, banner and firewall.
 
