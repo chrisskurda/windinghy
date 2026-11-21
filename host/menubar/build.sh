@@ -14,8 +14,10 @@ echo "Assembling bundle at $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv windinghy-menubar "$APP/Contents/MacOS/"
+# App icon (regenerate from icon.svg with ./make-icon.sh)
+cp AppIcon.icns "$APP/Contents/Resources/"
 # Bundle a copy of dinghy.mjs so Sync works even if the repo moves
-cp "$REPO_ROOT/host/dinghy.mjs" "$REPO_ROOT/host/guest.mjs" "$APP/Contents/Resources/"
+cp "$REPO_ROOT"/host/*.mjs "$APP/Contents/Resources/"   # dinghy, guest, vm, qga, ps-worker
 # Guest payload (setup.ps1, guest server) so `dinghy setup` works from the app alone
 ditto "$REPO_ROOT/payload" "$APP/Contents/Resources/payload"
 
@@ -43,6 +45,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>WinDinghy</string>
     <key>CFBundleIdentifier</key><string>app.windinghy.menubar</string>
     <key>CFBundleExecutable</key><string>windinghy-menubar</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleShortVersionString</key><string>${VERSION:-0.0.0}</string>
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>13.0</string>

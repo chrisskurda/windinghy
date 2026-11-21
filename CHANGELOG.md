@@ -97,6 +97,19 @@ bumps may include breaking changes).
 
 ### Fixed
 
+- `dinghy setup` works for the managed (QEMU) VM and on a clean slate: it no longer assumes UTM
+  (no "set the network to Shared Network" error), and with no UTM and no VM it simply builds a
+  WinDinghy VM. Setup's own web server is now served while the guest call runs (the call used to
+  block the server it was waiting on).
+- The doctor, `fix`, the menu-bar Start/Restart VM and Setup Check are backend-aware: UTM is only
+  required (and mentioned) when you actually use a UTM VM.
+- The "hide the logon banner" question is only asked when the VM really has a banner (a lone NUL
+  character in an unset banner no longer counts as one).
+- WinDinghy repairs its own settings instead of failing: unreadable `config.json` is backed up and
+  replaced, bad or stale values (removed volume, wrong ports for the managed VM, corrupt profiles,
+  empty banner files) are corrected on load, and each repair is reported on stderr.
+- The app bundle now includes all host modules (it previously copied only two and would have
+  crashed on import).
 - Launching a second app no longer risks a false "Lost the Windows VM" alert on the first
   one: each launch records its start time and a client that exits after a newer launch has
   started is treated as superseded (Windows can drop the replaced connection before it

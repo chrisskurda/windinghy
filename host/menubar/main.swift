@@ -10,6 +10,7 @@ struct WBConfig {
     var apiPort = 7148
     var rdpPort = 3389
     var vmName = "Windows"
+    var vmBackend = "utm"   // utm | qemu (the VM WinDinghy manages itself)
     var username = ""
     var promptcreds = "on"
     var appsDir = NSString(string: "~/Applications/WinDinghy").expandingTildeInPath
@@ -24,6 +25,7 @@ struct WBConfig {
         if let v = json["apiPort"] as? Int { c.apiPort = v }
         if let v = json["rdpPort"] as? Int { c.rdpPort = v }
         if let v = json["vmName"] as? String, !v.isEmpty { c.vmName = v }
+        if let v = json["vmBackend"] as? String, !v.isEmpty { c.vmBackend = v }
         if let v = json["username"] as? String { c.username = v }
         if let v = json["promptcreds"] as? String, !v.isEmpty { c.promptcreds = v }
         if let v = json["appsDir"] as? String, !v.isEmpty { c.appsDir = v }
@@ -636,7 +638,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // Start the VM via utmctl, but tell the truth about the outcome: utmctl
     // can hang on automation-permission prompts or fail on a wedged VM, so run
     // it async with a timeout and report via notification.
+    // Runs `dinghy <args>` in the background and reports the last line it printed when it finishes.
+    func runDinghyBackground(_ args: [String], done: @escaping (Int32, String) -> Void) {
+        guard let node = findNode(), let dinghy = findDinghy() else {
+            notify("Can't find node or dinghy.mjs — run `dinghy \(args.joined(separator: " "))` from a terminal instead.")
+            return
+        }
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: node)
+            p.arguments = [dinghy] + args
+            let pipe = Pipe()
+            p.standardOutput = pipe; p.standardError = pipe
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            p.environment = env
+            do { try p.run() } catch { DispatchQueue.main.async { done(1, error.localizedDescription) }; return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let text = String(data: data, encoding: .utf8) ?? ""
+            let last = text.split(separator: "\n").last.map(String.init) ?? ""
+            DispatchQueue.main.async { done(p.terminationStatus, last) }
+        }
+    }
+
     @objc func startVM() {
+        if cfg.vmBackend == "qemu" {
+            notify("Starting the WinDinghy VM…")
+            runDinghyBackground(["vm", "start"]) { [weak self] status, last in
+                self?.notify(status == 0 ? "The WinDinghy VM is online." : "Couldn't start the VM: \(last)")
+                if status == 0 { self?.poll() }
+            }
+            return
+        }
         let utmctl = "/Applications/UTM.app/Contents/MacOS/utmctl"
         guard FileManager.default.isExecutableFile(atPath: utmctl) else {
             notify("UTM not found at /Applications/UTM.app")
@@ -683,6 +717,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // Recovery for wedged guest states (e.g. RDP security errors like 0x1807
     // that persist regardless of credentials): graceful shutdown, then boot.
     @objc func restartVM() {
+        if cfg.vmBackend == "qemu" {
+            notify("Restarting the WinDinghy VM — asking Windows to shut down…")
+            runDinghyBackground(["vm", "stop"]) { [weak self] _, _ in
+                self?.runDinghyBackground(["vm", "start"]) { status, last in
+                    self?.notify(status == 0 ? "The WinDinghy VM is back online." : "Couldn't restart the VM: \(last)")
+                    if status == 0 { self?.poll() }
+                }
+            }
+            return
+        }
         let utmctl = "/Applications/UTM.app/Contents/MacOS/utmctl"
         guard FileManager.default.isExecutableFile(atPath: utmctl) else {
             notify("UTM not found at /Applications/UTM.app")
@@ -865,10 +909,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 if !ok { advice.append("• " + fix) }
             }
 
-            check(fm.fileExists(atPath: "/Applications/Windows App.app"), "Windows App installed",
-                  "Install \"Windows App\" from the Mac App Store — it renders the RemoteApp windows.")
-            check(fm.fileExists(atPath: "/Applications/UTM.app"), "UTM installed",
-                  "Install UTM from https://mac.getutm.app — it runs the Windows VM.")
+            // The RDP client: the bundled native one (or a built checkout), else Windows App.
+            let nativeClient = [
+                (Bundle.main.resourcePath ?? "") + "/freerdp/bin/sdl-freerdp",
+                NSString(string: "~/windinghy/vendor/freerdp/bin/sdl-freerdp").expandingTildeInPath,
+            ].contains { fm.isExecutableFile(atPath: $0) }
+            check(nativeClient || fm.fileExists(atPath: "/Applications/Windows App.app"), "RDP client available",
+                  "Rebuild WinDinghy (host/menubar/build.sh builds the native client), or install \"Windows App\" from the Mac App Store.")
+            if c.vmBackend == "qemu" {
+                check(fm.isExecutableFile(atPath: "/opt/homebrew/opt/qemu/bin/qemu-system-aarch64"), "QEMU installed",
+                      "Run: brew install qemu")
+            } else {
+                check(fm.fileExists(atPath: "/Applications/UTM.app"), "UTM installed",
+                      "Install UTM from https://mac.getutm.app — or choose \"Set Up Windows VM…\" to build a WinDinghy VM that needs no UTM.")
+            }
             check(findNode() != nil, "Node.js available",
                   "Install node (brew install node) — the launchers use it to find the VM.")
             check(findDinghy() != nil, "dinghy CLI found",
@@ -895,7 +949,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             }.resume()
             _ = sem.wait(timeout: .now() + 4)
             check(apiOk, "Guest agent reachable (\(c.host):\(c.apiPort))",
-                  "Start the VM in UTM. If the agent was never installed, choose \"Set Up Windows VM…\" from this menu and run the shown command inside Windows.")
+                  c.vmBackend == "qemu" ? "Choose \"Start Windows VM\" from this menu (or run: dinghy vm start)." : "Start the VM in UTM. If the agent was never installed, choose \"Set Up Windows VM…\" from this menu.")
             if apiOk, let skew = skewSec {
                 check(skew < 120, "Guest clock skew \(Int(skew))s",
                       "Guest clock drifted — RDP will fail with security errors (0x1807). In the VM run `w32tm /resync`, or restart the VM. Re-running the setup one-liner installs an automatic 15-minute sync.")

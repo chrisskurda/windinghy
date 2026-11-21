@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- WinDinghy app icon: a dinghy whose mainsail is a four-pane window, on a two-tone
+       tile split at the mast with a smiling hull (a nod to the Mac side of the trip). -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4FB4FF"/>
+      <stop offset="1" stop-color="#0F6BE0"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#083E9E"/>
+      <stop offset="1" stop-color="#04235F"/>
+    </linearGradient>
+    <linearGradient id="port" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2F86EE"/>
+      <stop offset="1" stop-color="#0D55C8"/>
+    </linearGradient>
+    <linearGradient id="hull" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D5E6FA"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS icon plate: 824pt squircle-ish tile inside the 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sky)"/>
+  <!-- darker port half: the tile is two-tone, split at the mast -->
+  <path d="M285 100 L499 100 L499 924 L285 924 A185 185 0 0 1 100 739 L100 285 A185 185 0 0 1 285 100 Z" fill="url(#port)"/>
+
+  <!-- mast -->
+  <rect x="490" y="205" width="18" height="480" rx="9" fill="#FFFFFF"/>
+
+  <!-- jib -->
+  <path d="M470 290 L470 610 L290 610 Z" fill="#CFE6FF" stroke="#CFE6FF" stroke-width="14" stroke-linejoin="round"/>
+
+  <!-- mainsail, split into four window panes -->
+  <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="14" stroke-linejoin="round">
+    <path d="M528 240 L612 354 L612 426 L528 426 Z"/>
+    <path d="M640 392 L665 426 L640 426 Z"/>
+    <path d="M528 454 L612 454 L612 610 L528 610 Z"/>
+    <path d="M640 454 L686 454 L801 610 L640 610 Z"/>
+  </g>
+
+  <!-- hull: a smile -->
+  <path d="M225 645 Q520 715 815 645 Q520 870 225 645 Z" fill="url(#hull)" stroke="#FFFFFF" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M225 645 Q520 715 815 645" fill="none" stroke="#FFB648" stroke-width="22" stroke-linecap="round"/>
+
+  <!-- sea, following the bottom of the tile -->
+  <path d="M100 752 Q151.5 728 203 752 T306 752 T409 752 T512 752 T615 752 T718 752 T821 752 T924 752
+           L924 739 A185 185 0 0 1 739 924 L285 924 A185 185 0 0 1 100 739 Z" fill="url(#sea)"/>
+  <path d="M190 822 Q230 800 270 822 T350 822 T430 822" fill="none" stroke="#4FB4FF" stroke-opacity=".55" stroke-width="12" stroke-linecap="round"/>
+  <path d="M560 852 Q600 830 640 852 T720 852 T800 852" fill="none" stroke="#4FB4FF" stroke-opacity=".55" stroke-width="12" stroke-linecap="round"/>
+</svg>

@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import * as VM from "./vm.mjs";
 
 const QGA = path.join(path.dirname(fileURLToPath(import.meta.url)), "qga.mjs");
@@ -158,4 +159,14 @@ export function ps(name, script, { env = {}, timeout = 300000, secret = false } 
         output: buf ? buf.toString("utf8").replace(/^\uFEFF/, "").trim() : "",
         timedOut: !buf,
     };
+}
+
+// Like ps(), but non-blocking: the call runs on a worker thread. Use it when the host must keep
+// serving something (e.g. the setup server) that the guest will fetch during the call.
+export function psAsync(name, script, opts = {}) {
+    return new Promise((resolve, reject) => {
+        const w = new Worker(new URL("./ps-worker.mjs", import.meta.url), { workerData: { cfg: backend.cfg, name, script, opts } });
+        w.once("message", resolve);
+        w.once("error", reject);
+    });
 }

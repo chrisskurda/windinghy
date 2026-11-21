@@ -91,13 +91,54 @@ function migrateLegacyPaths() {
     }
 }
 
+// Make a saved config safe to use whatever state it's in (hand-edited, from an older version, left
+// over from a removed VM or build). Returns the list of things it fixed.
+function sanitizeConfig(cfg) {
+    const notes = [];
+    const fix = (cond, msg, apply) => { if (cond) { apply(); notes.push(msg); } };
+    fix(!["utm", "qemu"].includes(cfg.vmBackend), `unknown vmBackend "${cfg.vmBackend}" -> utm`, () => { cfg.vmBackend = "utm"; });
+    fix(!["auto", "native", "windows-app"].includes(cfg.client), `unknown client "${cfg.client}" -> auto`, () => { cfg.client = "auto"; });
+    for (const k of ["apiPort", "rdpPort"])
+        fix(!Number.isInteger(cfg[k]) || cfg[k] < 1 || cfg[k] > 65535, `bad ${k} "${cfg[k]}" -> ${DEFAULTS[k]}`, () => { cfg[k] = DEFAULTS[k]; });
+    if (cfg.vmBackend === "qemu") {
+        // The managed VM is always behind these forwarded ports; anything else is stale.
+        fix(cfg.host !== "127.0.0.1" || cfg.rdpPort !== VM.RDP_PORT || cfg.apiPort !== VM.API_PORT,
+            "managed VM address reset to 127.0.0.1 and its forwarded ports", () => { cfg.host = "127.0.0.1"; cfg.rdpPort = VM.RDP_PORT; cfg.apiPort = VM.API_PORT; });
+        fix(cfg.vmName !== VM.VM_NAME, `managed VM name "${cfg.vmName}" -> ${VM.VM_NAME}`, () => { cfg.vmName = VM.VM_NAME; });
+    }
+    fix(cfg.nativeBin && !fs.existsSync(cfg.nativeBin), `nativeBin ${cfg.nativeBin} no longer exists (removed volume or build) -> use the bundled client`, () => { cfg.nativeBin = ""; });
+    if (cfg.profiles === undefined) cfg.profiles = {};   // absent is normal (nothing saved yet)
+    fix(!cfg.profiles || typeof cfg.profiles !== "object" || Array.isArray(cfg.profiles), "saved backend profiles were corrupt -> reset", () => { cfg.profiles = {}; });
+    fix(typeof cfg.username !== "string", "username wasn't text -> cleared", () => { cfg.username = ""; });
+    // Banner files from older VMs: drop any that are unreadable or hold no real text.
+    for (const f of ["banner.json", "banner-qemu.json"]) {
+        const bp = path.join(CONFIG_DIR, f);
+        if (!fs.existsSync(bp)) continue;
+        let ok = false;
+        try { const b = JSON.parse(fs.readFileSync(bp, "utf8")); ok = !!(cleanBanner(b.text) || cleanBanner(b.caption)); } catch {}
+        if (!ok) { fs.rmSync(bp, { force: true }); notes.push(`removed empty/corrupt ${f}`); }
+    }
+    return notes;
+}
+
 function loadConfig() {
     migrateLegacyPaths();
     let cfg;
     try {
         cfg = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
-    } catch {
+    } catch (e) {
         cfg = { ...DEFAULTS };
+        if (fs.existsSync(CONFIG_PATH)) {
+            // Unreadable config: keep a copy for inspection and start clean instead of failing.
+            const bak = `${CONFIG_PATH}.broken-${Date.now()}`;
+            try { fs.copyFileSync(CONFIG_PATH, bak); console.error(`WinDinghy: config.json was unreadable; saved a copy as ${path.basename(bak)} and started fresh.`); } catch {}
+            try { saveConfig(cfg); } catch {}
+        }
+    }
+    const repaired = sanitizeConfig(cfg);
+    if (repaired.length) {
+        for (const n of repaired) console.error(`WinDinghy: repaired settings: ${n}`);
+        try { saveConfig(cfg); } catch {}
     }
     const oldAppsDir = path.join(os.homedir(), "Applications", "WinBoat");
     if (cfg.appsDir === oldAppsDir) {
@@ -632,11 +673,17 @@ function bannerPath(cfg) {
     return path.join(CONFIG_DIR, (cfg?.vmBackend ?? "utm") === "qemu" ? "banner-qemu.json" : "banner.json");
 }
 
+// A banner counts only if it has real text: registries can hold a lone NUL or whitespace.
+function cleanBanner(t) { return String(t ?? "").replace(/\0/g, "").replace(/\r\n?/g, "\n").trim(); }
+
 // The Windows logon banner (legal notice), reported by the guest during setup.
 // Shown natively when the server actually asks for it (the client logs a marker);
 // accepting signals the client to dismiss the matching Windows dialog.
 function readBanner(cfg) {
-    try { return JSON.parse(fs.readFileSync(bannerPath(cfg), "utf8")); } catch { return null; }
+    try {
+        const b = JSON.parse(fs.readFileSync(bannerPath(cfg), "utf8"));
+        return cleanBanner(b.text) || cleanBanner(b.caption) ? b : null;
+    } catch { return null; }
 }
 
 function nativeBannerAccepted(b) {
@@ -807,7 +854,7 @@ function diagnoseExit(cfg, code, log, elapsedSec = 0) {
         if (elapsedSec > 45) return null;
         if (cfg.vmBackend === "qemu")
             return { title: "Windows ended the session", message: "Windows closed the session right after connecting (the app may have exited immediately, or isn't installed in this VM). Run: dinghy sync   then try again; if it keeps happening: dinghy fix" };
-        return { title: "Windows ended the session", message: `If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.` };
+        return { title: "Windows ended the session", message: `If you're signed in on the VM's own screen as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.` };
     }
     if (/0x0*1807|CREDSSP|ERRCONNECT_SECURITY|ERRCONNECT_TLS|SEC_E_/i.test(errs))
         return { title: "Security error", message: "Windows refused the secure connection, usually because the VM clock drifted. Run: dinghy fix clock" };
@@ -833,7 +880,7 @@ async function cmdOpenRdp(cfg, bundleDir) {
     const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
     const ok = await ensureGuest(cfg, false);
     if (!ok) {
-        notify(`Can't reach the Windows VM. Start it in UTM, then try again.`);
+        notify(`Can't reach the Windows VM. ${startHint(cfg)}, then try again.`);
         process.exit(1);
     }
     // A drifted guest clock breaks CredSSP with opaque errors (0x1807). Set it from the
@@ -849,7 +896,7 @@ async function cmdOpenRdp(cfg, bundleDir) {
                 if (skew <= 120) break;
             }
             if (skew > 120) {
-                notify(`Clock still drifted: the connection may fail with a security error (0x1807). Run "dinghy fix clock" (needs UTM Guest Tools) or restart the VM.`);
+                notify(`Clock still drifted: the connection may fail with a security error (0x1807). Run "dinghy fix clock" (needs the guest agent) or restart the VM.`);
             }
         }
     }
@@ -886,8 +933,13 @@ async function cmdDoctor(cfg) {
         add(fs.existsSync("/Applications/Windows App.app"), "RDP client (Windows App) installed",
             "Run scripts/build-freerdp.sh for the native client, or install Windows App from the Mac App Store.");
     }
-    add(fs.existsSync("/Applications/UTM.app"), "UTM installed",
-        "Install from https://mac.getutm.app");
+    if (isQemu(cfg)) {
+        add(VM.tools().ok, "QEMU installed", "Run: brew install qemu");
+        add(!VM.exists(cfg) || VM.isRunning(cfg), "WinDinghy VM running", "Start it with: dinghy vm start");
+    } else {
+        add(fs.existsSync("/Applications/UTM.app"), "UTM installed",
+            "Install from https://mac.getutm.app, or run: dinghy vm create (a WinDinghy VM needs no UTM)");
+    }
     add(true, `node ${process.version}`, "");
     const cfgExists = fs.existsSync(CONFIG_PATH);
     add(cfgExists, "dinghy config present", "Run: dinghy setup");
@@ -908,8 +960,9 @@ async function cmdDoctor(cfg) {
         } catch {}
     }
     if (G.utmInstalled() && G.vmStatus(cfg.vmName) === "started") {
-        add(G.agentUp(cfg.vmName), "UTM guest agent (enables dinghy setup / fix)",
-            "In UTM choose Virtual Machine > Install Windows Guest Tools, run the installer in Windows once, then: dinghy setup");
+        add(G.agentUp(cfg.vmName), "guest agent (enables dinghy setup / fix)",
+            isQemu(cfg) ? "The agent isn't answering; give the VM a minute after starting, or run: dinghy fix"
+                        : "In UTM choose Virtual Machine > Install Windows Guest Tools, run the installer in Windows once, then: dinghy setup");
     }
     add(probeAppManagement(cfg), "App Management permission (lets WinDinghy update app launchers)",
         "Turn on WinDinghy in System Settings > Privacy & Security > App Management, or run: dinghy permissions --prompt");
@@ -991,7 +1044,7 @@ function startSetupServer(cfg, ip, noBanner, log = true, guestUrl = null) {
                 try {
                     const b = JSON.parse(body);
                     fs.mkdirSync(CONFIG_DIR, { recursive: true });
-                    const caption = String(b.caption ?? ""), text = String(b.text ?? "");
+                    const caption = cleanBanner(b.caption), text = cleanBanner(b.text);
                     if (!caption && !text) fs.rmSync(bannerPath(cfg), { force: true });   // the guest has no banner
                     else fs.writeFileSync(bannerPath(cfg), JSON.stringify({ caption, text }, null, 2) + "\n");
                     if (log) console.log(`  [${new Date().toLocaleTimeString()}] guest reported its logon banner${caption || text ? "" : " (none)"}`);
@@ -1265,6 +1318,15 @@ async function cmdVm(cfg, args) {
 function say(msg) { console.log(msg); }
 function stepSay(msg) { console.log(`==> ${msg}`); }
 
+// Backend-aware hints (UTM VM you run yourself vs the VM WinDinghy manages).
+const isQemu = cfg => cfg.vmBackend === "qemu";
+const startHint = cfg => isQemu(cfg) ? "Start it with: dinghy vm start" : "Start it in UTM";
+function agentHelp(cfg) {
+    return isQemu(cfg)
+        ? `The guest agent isn't answering. Give the VM a minute after starting it (dinghy vm start), then try again; if it never comes up, run: dinghy fix`
+        : AGENT_HELP;
+}
+
 const AGENT_HELP = `The UTM guest agent isn't running in Windows. One-time step: in UTM choose
 "Virtual Machine > Install Windows Guest Tools" (or install utm-guest-tools from UTM's
 guest tools ISO inside Windows). Then run this command again.`;
@@ -1279,7 +1341,7 @@ function randomPassword() {
 // Pick the UTM VM to manage: the configured one, else the only/running one, else ask.
 function chooseVm(cfg) {
     const vms = G.listVms();
-    if (!vms.length) throw new Error("UTM has no virtual machines. Create or import a Windows 11 ARM VM in UTM first.");
+    if (!vms.length) throw new Error(isQemu(cfg) ? "There's no WinDinghy VM yet. Create it with: dinghy vm create" : "UTM has no virtual machines. Create or import a Windows 11 ARM VM in UTM first, or run: dinghy vm create");
     let vm = vms.find(v => v.name === cfg.vmName);
     if (!vm) {
         const running = vms.filter(v => v.status === "started");
@@ -1314,9 +1376,11 @@ function pickGuestIp(ips) {
 
 async function cmdSetup(cfg, args) {
     let noBanner = args.includes("--no-banner") || cfg.suppressBanner === "on";
-    if (!G.utmInstalled()) {
-        spawnSync("open", ["https://mac.getutm.app"]);
-        throw new Error("UTM isn't installed. Install it (https://mac.getutm.app), create a Windows 11 ARM VM, then run: dinghy setup");
+    const qemu = isQemu(cfg);
+    // Clean slate (no UTM, no managed VM yet): build a WinDinghy VM instead of asking for UTM.
+    if (qemu ? !VM.exists(cfg) : !G.utmInstalled()) {
+        say(qemu ? "There's no WinDinghy VM yet: creating one." : "UTM isn't installed: creating a WinDinghy VM instead (it doesn't need UTM).");
+        return vmCreate(cfg, args);
     }
     stepSay("Finding your Windows VM");
     const vm = chooseVm(cfg);
@@ -1324,31 +1388,43 @@ async function cmdSetup(cfg, args) {
     if (vm.status !== "started") {
         stepSay("Starting the VM");
         G.startVm(vm.name);
-        if (!await waitFor(() => G.vmStatus(vm.name) === "started", 90, 2000)) throw new Error("The VM didn't start. Start it in UTM and run dinghy setup again.");
+        if (!await waitFor(() => G.vmStatus(vm.name) === "started", 90, 2000)) throw new Error(`The VM didn't start. ${startHint(cfg)} and run dinghy setup again.`);
     }
 
-    stepSay("Waiting for the UTM guest agent");
+    stepSay("Waiting for the guest agent");
     if (!await waitFor(() => G.agentUp(vm.name), 240)) {
-        say(`    Not available yet.\n${AGENT_HELP.split("\n").map(l => "    " + l).join("\n")}`);
+        if (qemu) throw new Error(agentHelp(cfg));
+        say(`    Not available yet.\n${agentHelp(cfg).split("\n").map(l => "    " + l).join("\n")}`);
         say(`\nFalling back to the manual one-liner so you're not blocked:\n`);
         return cmdServeSetup(cfg, false, noBanner);
     }
-    const ip = pickGuestIp(G.guestIps(vm.name));
-    if (!ip) throw new Error("The VM has no address on UTM's shared network. In UTM, set the VM's first network device to \"Shared Network\".");
+    let ip;
+    if (qemu) {
+        ip = "127.0.0.1"; // the managed VM is reached through forwarded ports; its own address is private
+    } else {
+        ip = pickGuestIp(G.guestIps(vm.name));
+        if (!ip) throw new Error("The VM has no address on UTM's shared network. In UTM, set the VM's first network device to \"Shared Network\".");
+    }
     if (ip !== cfg.host) { cfg.host = ip; saveConfig(cfg); }
-    say(`    guest agent OK, VM at ${ip}`);
+    say(`    guest agent OK, VM at ${ip}${qemu ? ` (RDP :${cfg.rdpPort}, API :${cfg.apiPort})` : ""}`);
 
+    if (noBanner) {
+        // Only ask if this VM actually shows a logon banner; otherwise there's nothing to suppress.
+        const probe = G.ps(vm.name, `$k='HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System'; $t=(Get-ItemProperty $k -ErrorAction SilentlyContinue); $a=("$($t.legalnoticetext)" -replace [char]0,'').Trim(); $b=("$($t.legalnoticecaption)" -replace [char]0,'').Trim(); if ($a -or $b) { 'has-banner' } else { 'no-banner' }`, { timeout: 60000 });
+        if (!/has-banner/.test(probe.output)) { noBanner = false; say("    This VM has no logon banner: nothing to suppress."); }
+    }
     if (noBanner) {
         const ok = asDialog(`button returned of (display dialog "You asked WinDinghy to keep Windows' logon banner suppressed.\\n\\nThat banner may be your organization's acceptable-use or network policy notice. Hiding it may violate that policy, and you are responsible for deciding this is OK." with title "WinDinghy" with icon caution buttons {"Keep the banner", "Suppress it"} default button "Keep the banner")`);
         if (ok !== "Suppress it") { noBanner = false; say("    Banner suppression skipped."); }
     }
 
     stepSay("Installing the WinDinghy guest components (a minute or two)");
-    const serveIp = detectServeIp(cfg);
+    const serveIp = qemu ? "127.0.0.1" : detectServeIp(cfg);
     if (!serveIp) throw new Error(`No local interface on the guest's subnet (${cfg.host}/24).`);
-    const { server, baseUrl } = startSetupServer(cfg, serveIp, noBanner, false);
+    const { server, baseUrl } = startSetupServer(cfg, serveIp, noBanner, false, qemu ? `http://10.0.2.2:${SETUP_PORT}` : null);
     try {
-        const r = G.ps(vm.name, `irm ${baseUrl}/setup.ps1 | iex`, { env: noBanner ? { WINDINGHY_YES: "YES" } : {}, timeout: 600000 });
+        // Async: the guest fetches setup.ps1 from the server above, which this process must keep serving.
+        const r = await G.psAsync(vm.name, `irm ${baseUrl}/setup.ps1 | iex`, { env: noBanner ? { WINDINGHY_YES: "YES" } : {}, timeout: 600000 });
         if (r.output) say(r.output.split("\n").map(l => "    " + l).join("\n"));
         if (!await waitFor(() => guestAlive(cfg, 2500), 90)) throw new Error("The guest server didn't come up. Run: dinghy fix");
     } finally {
@@ -1421,10 +1497,10 @@ async function cmdFix(cfg, args) {
     const which = args[0] && !args[0].startsWith("-") ? args[0] : "all";
     const valid = ["all", "session", "rdp", "clock", "server", "login"];
     if (!valid.includes(which)) throw new Error(`Usage: dinghy fix [${valid.join("|")}]`);
-    if (!G.utmInstalled()) throw new Error("UTM isn't installed.");
+    if (!G.utmInstalled()) throw new Error(isQemu(cfg) ? "QEMU isn't installed (brew install qemu)." : "UTM isn't installed.");
     const vm = chooseVm(cfg).name;
-    if (G.vmStatus(vm) !== "started") { say(`VM "${vm}" isn't running. Start it (menu bar > Start VM, or: dinghy launch "<app>") and try again.`); return; }
-    if (!G.agentUp(vm)) { say(AGENT_HELP); process.exitCode = 1; return; }
+    if (G.vmStatus(vm) !== "started") { say(`VM "${vm}" isn't running. ${isQemu(cfg) ? "Start it with: dinghy vm start" : "Start it (menu bar > Start VM, or: dinghy launch \"<app>\")"} and try again.`); return; }
+    if (!G.agentUp(vm)) { say(agentHelp(cfg)); process.exitCode = 1; return; }
     await findGuest(cfg);
     let fixed = 0;
     const all = which === "all";
@@ -1475,7 +1551,7 @@ async function cmdFix(cfg, args) {
     if (all || which === "session") {
         const id = consoleSessionId(cfg, vm);
         if (id != null) {
-            const yes = asDialog(`button returned of (display dialog "You're signed in to the Windows VM's own screen (UTM) as ${asq(winUser(cfg))}. Windows apps can't open through WinDinghy while that session exists.\\n\\nSign it out now? Unsaved work in that Windows session will be lost." with title "WinDinghy" with icon caution buttons {"Leave it", "Sign out"} default button "Leave it")`);
+            const yes = asDialog(`button returned of (display dialog "You're signed in on the Windows VM's own screen as ${asq(winUser(cfg))}. Windows apps can't open through WinDinghy while that session exists.\\n\\nSign it out now? Unsaved work in that Windows session will be lost." with title "WinDinghy" with icon caution buttons {"Leave it", "Sign out"} default button "Leave it")`);
             if (yes === "Sign out") {
                 stepSay("Signing out the console session");
                 G.ps(vm, `logoff ${id}`);

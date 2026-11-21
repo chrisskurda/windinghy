@@ -156,6 +156,9 @@ $ErrorActionPreference = "Continue"
 $sysPol = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 $bCap = (Get-ItemProperty $sysPol -Name legalnoticecaption -ErrorAction SilentlyContinue).legalnoticecaption
 $bTxt = (Get-ItemProperty $sysPol -Name legalnoticetext -ErrorAction SilentlyContinue).legalnoticetext
+# An unset banner can hold a lone NUL character, which is "non-empty" to PowerShell: strip it.
+$bCap = ("$bCap" -replace [char]0, "").Trim()
+$bTxt = ("$bTxt" -replace [char]0, "").Trim()
 if ($bTxt -or $bCap) {
     try {
         $body = @{ caption = "$bCap"; text = "$bTxt" } | ConvertTo-Json
