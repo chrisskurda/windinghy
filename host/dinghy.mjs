@@ -891,6 +891,8 @@ function diagnoseExit(cfg, code, log, elapsedSec = 0) {
     // session and replaces this connection (its windows move to the newer client). Not an error.
     if (/CONN_REPLACED|DISCONNECTED_BY_OTHER_CONNECTION/.test(errs)) return null;
     if (/ERRINFO_RPC_INITIATED_DISCONNECT_BY_USER|ERRINFO_DISCONNECT_BY_USER/.test(errs)) return null;
+    // Quitting the app (Dock > Quit, Cmd-Q) cancels the connection on purpose; that's not a lost VM.
+    if (/ERRCONNECT_CONNECT_CANCELLED|0x0002000B/.test(errs) && !/TRANSPORT_FAILED|CONNECT_FAILED|refused|timed out/i.test(errs.replace(/ERRCONNECT_CONNECT_CANCELLED/g, ""))) return null;
     if (code === 0 || code === null || code === -1) return null; // clean exit or killed by a signal
     if (/ERRCONNECT_LOGON_FAILURE|0x00020014/.test(errs))
         return { title: "Windows rejected the login", message: `Windows rejected the password for ${winUser(cfg)}. Run "dinghy fix login" to reset it, or "dinghy login" to enter the right one.` };
