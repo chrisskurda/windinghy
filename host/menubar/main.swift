@@ -231,6 +231,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         poll()
         updateBadge()
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.poll() }
+        // macOS App Management: WinDinghy must be allowed to update its app launchers. Ask once a day.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in self?.requestAppManagement() }
         // A sleeping Mac pauses the VM, so its clock falls behind; push the Mac's time in once we're awake.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -272,6 +274,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 self.metricsLine = ""
                 self.rediscoverGuest()
             }
+        }
+    }
+
+    // Runs as a child of this app, so macOS evaluates the permission for WinDinghy.app itself.
+    func appManagementAllowed() -> Bool {
+        guard let node = findNode(), let dinghy = findDinghy() else { return true }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [dinghy, "permissions", "--quiet"]
+        p.standardOutput = Pipe(); p.standardError = Pipe()
+        do { try p.run() } catch { return true }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }
+
+    func requestAppManagement() {
+        guard let node = findNode(), let dinghy = findDinghy() else { return }
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: node)
+            p.arguments = [dinghy, "permissions", "--prompt", "--quiet"]
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            try? p.run()
+            p.waitUntilExit()
         }
     }
 
@@ -879,6 +905,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             check(rdpOk, "RDP reachable (\(c.host):\(c.rdpPort))",
                   "Windows isn't accepting RDP — choose \"Set Up Windows VM…\" from this menu and re-run the command inside the VM (requires Windows Pro/Enterprise, not Home).")
 
+            let appMgmtOK = self.appManagementAllowed()
+            check(appMgmtOK, "App Management permission (lets WinDinghy update app launchers)",
+                  "Turn on WinDinghy in System Settings > Privacy & Security > App Management.")
+
             let launcherCount = ((try? fm.contentsOfDirectory(atPath: c.appsDir)) ?? []).filter { $0.hasSuffix(".app") }.count
             check(launcherCount > 0, "\(launcherCount) app launchers synced",
                   "Run Sync Apps Now from this menu (VM must be online).")
@@ -893,8 +923,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 alert.informativeText = body
                 alert.alertStyle = advice.isEmpty ? .informational : .warning
                 alert.addButton(withTitle: "OK")
+                if !appMgmtOK { alert.addButton(withTitle: "Open App Management") }
                 NSApp.activate(ignoringOtherApps: true)
-                alert.runModal()
+                if alert.runModal() == .alertSecondButtonReturn, !appMgmtOK,
+                   let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles") {
+                    NSWorkspace.shared.open(url)
+                }
             }
         }
     }

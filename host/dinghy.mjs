@@ -11,6 +11,7 @@
 //   dinghy serve-setup          serve the guest payload + setup one-liner, wait for the guest
 //                               (--no-banner or config suppressBanner=on: keep the Windows banner suppressed; opt-in, may violate network policy)
 //   dinghy status               guest health / version / metrics
+//   dinghy permissions [--prompt]  check (or request) the macOS App Management permission
 //   dinghy discover             find the VM again after its IP changed (by MAC, then subnet scan)
 //   dinghy sync                 fetch app list, (re)generate ~/Applications/WinDinghy/*.app
 //   dinghy launch <name>        launch a synced app
@@ -307,6 +308,7 @@ async function portOpen(host, port) {
 }
 
 async function cmdSync(cfg) {
+    await ensureAppManagement(cfg);
     console.log(`Fetching app list from ${apiBase(cfg)}/apps ...`);
     const apps = await (await api(cfg, "/apps")).json();
     console.log(`Guest reports ${apps.length} apps`);
@@ -662,6 +664,39 @@ function logTail(file) {
     try { return fs.readFileSync(file, "utf8").split("\n").slice(-40).join("\n"); } catch { return ""; }
 }
 
+// ---------- macOS App Management permission ----------
+// macOS blocks one app from modifying another app's bundle unless it is allowed in System Settings >
+// Privacy & Security > App Management. WinDinghy's launchers in ~/Applications/WinDinghy count as apps,
+// so when the menu-bar app (or a dinghy it started) must rewrite them, the switch has to be on.
+// There's no API to request it, but a probe tells us whether it's granted: try a harmless edit inside
+// an existing launcher's MacOS folder (where the signed client copy lives) and see if macOS refuses.
+
+const APP_MGMT_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles";
+
+// true = allowed (or nothing to protect yet), false = blocked
+function probeAppManagement(cfg) {
+    let apps = [];
+    try { apps = fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")); } catch {}
+    const withClient = apps.find(a => fs.existsSync(path.join(cfg.appsDir, a, "Contents", "MacOS", "freerdp"))) ?? apps[0];
+    if (!withClient) return true;
+    const probe = path.join(cfg.appsDir, withClient, "Contents", "MacOS", ".dinghy-probe");
+    try { fs.writeFileSync(probe, "1"); fs.rmSync(probe, { force: true }); return true; }
+    catch (e) { return !/^(EPERM|EACCES)$/.test(e.code ?? ""); }
+}
+
+// Prompt (native dialog) and, if asked, wait for the user to flip the switch. Returns true if allowed.
+async function ensureAppManagement(cfg, { wait = true } = {}) {
+    if (probeAppManagement(cfg)) return true;
+    const out = asDialog(`button returned of (display dialog "WinDinghy needs permission to update its app launchers.\n\nIn System Settings > Privacy & Security > App Management, turn on WinDinghy. This is a one-time step; I'll continue automatically once it's on." with title "WinDinghy" with icon caution buttons {"Not now", "Open Settings"} default button "Open Settings")`);
+    if (out !== "Open Settings") return false;
+    spawnSync("open", [APP_MGMT_PANE]);
+    if (!wait) return false;
+    console.log("Waiting for you to turn on WinDinghy under App Management (up to 3 minutes)...");
+    const ok = await waitFor(() => probeAppManagement(cfg), 180, 2500);
+    console.log(ok ? "Permission granted." : "Still not allowed: launchers can't be updated until it is.");
+    return ok;
+}
+
 // macOS "App Management" protection blocks one app from modifying another app's bundle. The launcher
 // bundles in ~/Applications/WinDinghy count as apps, so when the menu-bar app (or dinghy started from
 // it) can't rewrite them, explain the one-time permission instead of failing silently.
@@ -671,7 +706,7 @@ function appManagementHint(err) {
     try { if (Date.now() - fs.statSync(flag).mtimeMs < 600000) return true; } catch {} // at most every 10 minutes
     try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(flag, ""); } catch {}
     const out = asDialog(`button returned of (display dialog "macOS is blocking WinDinghy from updating its app launchers (App Management protection).\n\nOpen System Settings > Privacy & Security > App Management, turn on WinDinghy, then try again." with title "WinDinghy" with icon caution buttons {"Not now", "Open Settings"} default button "Open Settings")`);
-    if (out === "Open Settings") spawnSync("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles"]);
+    if (out === "Open Settings") spawnSync("open", [APP_MGMT_PANE]);
     return true;
 }
 
@@ -876,6 +911,8 @@ async function cmdDoctor(cfg) {
         add(G.agentUp(cfg.vmName), "UTM guest agent (enables dinghy setup / fix)",
             "In UTM choose Virtual Machine > Install Windows Guest Tools, run the installer in Windows once, then: dinghy setup");
     }
+    add(probeAppManagement(cfg), "App Management permission (lets WinDinghy update app launchers)",
+        "Turn on WinDinghy in System Settings > Privacy & Security > App Management, or run: dinghy permissions --prompt");
     add(fs.existsSync(path.join(PROJECT_ROOT, "host", "dinghy-update.sh")), "updater available",
         "This checkout is missing host/dinghy-update.sh — re-clone the repo.");
     const launcherCount = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")).length : 0;
@@ -1391,6 +1428,7 @@ async function cmdFix(cfg, args) {
     await findGuest(cfg);
     let fixed = 0;
     const all = which === "all";
+    if (all && !probeAppManagement(cfg)) { await ensureAppManagement(cfg); fixed++; }
 
     if (all || which === "server") {
         if (!await guestAlive(cfg, 2500)) {
@@ -1505,6 +1543,22 @@ try {
         case "config":      cmdConfig(cfg, rest[0], rest[1]); break;
         case "update":      cmdUpdate(); break;
         case "login":       cmdLogin(cfg); break;
+        case "permissions": {
+            let ok;
+            if (rest.includes("--prompt")) {
+                const quiet = rest.includes("--quiet");
+                const stamp = path.join(CONFIG_DIR, "app-management-prompted");
+                // Background callers (app start) don't nag: at most one prompt a day.
+                if (quiet && !probeAppManagement(cfg) && (() => { try { return Date.now() - fs.statSync(stamp).mtimeMs < 86400000; } catch { return false; } })()) {
+                    ok = false;
+                } else {
+                    if (quiet && !probeAppManagement(cfg)) { try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(stamp, ""); } catch {} }
+                    ok = await ensureAppManagement(cfg, { wait: !quiet });
+                }
+            } else ok = probeAppManagement(cfg);
+            if (!rest.includes("--quiet")) console.log(ok ? "App Management: allowed" : "App Management: BLOCKED (System Settings > Privacy & Security > App Management > WinDinghy)");
+            process.exit(ok ? 0 : 1);
+        }
         case "setup":       await cmdSetup(cfg, rest); break;
         case "vm":          await cmdVm(cfg, rest); break;
         case "fix":         await cmdFix(cfg, rest); break;

@@ -89,6 +89,12 @@ bumps may include breaking changes).
   switches between a UTM VM and the managed one (each keeps its own settings).
 - `dinghy fix login` repairs the dedicated Windows account (group membership, password).
 
+- macOS App Management permission is now handled up front: `dinghy permissions [--prompt]`
+  probes whether the menu-bar app may update the app launchers; setup, sync, Fix Problems and
+  `doctor` check it, the menu-bar app asks (at most once a day) when it starts and lists it in
+  "Setup Check…" with an Open App Management button, and the flows that need it open the
+  Settings pane and continue automatically once the switch is on.
+
 ### Fixed
 
 - Launching a second app no longer risks a false "Lost the Windows VM" alert on the first
