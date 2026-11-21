@@ -180,6 +180,8 @@ if ($bTxt -or $bCap) {
 } else {
     Ok "No logon banner configured"
     cmd /c 'schtasks /delete /f /tn WinDinghyNoBanner >nul 2>&1'
+    # Tell the Mac so it forgets any banner it stored for an earlier VM.
+    try { Invoke-RestMethod -Uri "$BaseUrl/banner" -Method Post -Body (@{ caption = ""; text = "" } | ConvertTo-Json) -ContentType "application/json" -UseBasicParsing | Out-Null } catch {}
 }
 $ErrorActionPreference = "Stop"
 

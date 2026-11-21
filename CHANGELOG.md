@@ -91,6 +91,15 @@ bumps may include breaking changes).
 
 ### Fixed
 
+- Stale state from an old VM no longer leaks into a new one: the logon banner is stored per
+  backend (and the guest tells the Mac when it has none), and the "console session (UTM)"
+  advice only appears for UTM VMs.
+- Launching a second app no longer shows an error for the first: Windows allows one live
+  connection per user, so the newer client takes over the session and displays every open
+  app's windows; the replaced client exits quietly. (Client Windows editions also allow only
+  one active interactive session, so concurrent separate sessions aren't possible.)
+- The error classifier only reads real `[ERROR]` lines; harmless warnings (e.g. "does not
+  support AAD security") no longer produce a false "security error / clock drift" alert.
 - A Remote Desktop *authorization* failure (account not in Remote Desktop Users) no
   longer makes the launcher discard the saved password; only a real logon failure does,
   and the error alert now says what's wrong.

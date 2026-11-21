@@ -624,13 +624,17 @@ function getPassword(cfg, forcePrompt = false) {
     return pw || null;
 }
 
-const BANNER_PATH = path.join(CONFIG_DIR, "banner.json");
+// The logon banner belongs to a specific VM: keep one file per backend so the old VM's text
+// never shows up for a new one (banner.json is the original UTM one).
+function bannerPath(cfg) {
+    return path.join(CONFIG_DIR, (cfg?.vmBackend ?? "utm") === "qemu" ? "banner-qemu.json" : "banner.json");
+}
 
 // The Windows logon banner (legal notice), reported by the guest during setup.
 // Shown natively when the server actually asks for it (the client logs a marker);
 // accepting signals the client to dismiss the matching Windows dialog.
-function readBanner() {
-    try { return JSON.parse(fs.readFileSync(BANNER_PATH, "utf8")); } catch { return null; }
+function readBanner(cfg) {
+    try { return JSON.parse(fs.readFileSync(bannerPath(cfg), "utf8")); } catch { return null; }
 }
 
 function nativeBannerAccepted(b) {
@@ -690,6 +694,7 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
     const pw = getPassword(cfg, retried);
     if (!pw) { notify("No Windows password saved. Run: dinghy login"); process.exit(1); }
 
+    const launchedAt = Date.now();
     fs.mkdirSync(LOG_DIR, { recursive: true });
     const logFile = path.join(LOG_DIR, `${safeName(meta.Name ?? "desktop")}.log`);
     const fd = fs.openSync(logFile, "w");
@@ -708,7 +713,7 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
         await new Promise(r => setTimeout(r, 400));
         if (!bannerHandled && logTail(logFile).includes("WINDINGHY-LOGON-NOTICE")) {
             bannerHandled = true;
-            const b = readBanner();
+            const b = readBanner(cfg);
             if (b && (b.text || b.caption)) {
                 if (nativeBannerAccepted(b)) process.kill(child.pid, "SIGUSR1");
                 else { process.kill(child.pid, "SIGTERM"); return; }
@@ -723,29 +728,43 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
         keychainDelete(winUser(cfg));
         return launchNative(cfg, meta, bundleDir, true);
     }
-    const problem = diagnoseExit(cfg, exited, log);
+    const problem = diagnoseExit(cfg, exited, log, (Date.now() - launchedAt) / 1000);
     if (problem) showError(problem.title, problem.message, logFile);
 }
 
 // Map a client exit to a user-facing problem, or null for a normal end.
-function diagnoseExit(cfg, code, log) {
+function diagnoseExit(cfg, code, log, elapsedSec = 0) {
+    // Judge by genuine error lines only: warnings (e.g. "This build does not support AAD security")
+    // and debug chatter appear in every healthy session and must not be mistaken for failures.
+    const errs = log.split("\n").filter(l => /\[ERROR\]/.test(l)).join("\n");
     if (/LAST-WINDOW-CLOSED/.test(log)) return null;
-    if (/ERRINFO_RPC_INITIATED_DISCONNECT_BY_USER|ERRINFO_DISCONNECT_BY_USER/.test(log)) return null;
+    // Windows allows one live connection per user: launching another app re-attaches to the same
+    // session and replaces this connection (its windows move to the newer client). Not an error.
+    if (/CONN_REPLACED|DISCONNECTED_BY_OTHER_CONNECTION/.test(errs)) return null;
+    if (/ERRINFO_RPC_INITIATED_DISCONNECT_BY_USER|ERRINFO_DISCONNECT_BY_USER/.test(errs)) return null;
     if (code === 0 || code === null || code === -1) return null; // clean exit or killed by a signal
-    if (/ERRCONNECT_LOGON_FAILURE|0x00020014/.test(log))
+    if (/ERRCONNECT_LOGON_FAILURE|0x00020014/.test(errs))
         return { title: "Windows rejected the login", message: `Windows rejected the password for ${winUser(cfg)}. Run "dinghy fix login" to reset it, or "dinghy login" to enter the right one.` };
-    if (/ERRCONNECT_ACCESS_DENIED|0x00020016|authorization result/.test(log))
+    if (/ERRCONNECT_ACCESS_DENIED|0x00020016|authorization result/.test(errs))
         return { title: "Not allowed to use Remote Desktop", message: `${winUser(cfg)} signed in but isn't allowed to log on over Remote Desktop. Run: dinghy fix login` };
-    if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(log))
+    if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(errs)) {
+        // The user signing out of Windows (or an app quitting) a while after connecting is a normal end.
+        if (elapsedSec > 45) return null;
+        if (cfg.vmBackend === "qemu")
+            return { title: "Windows ended the session", message: "Windows closed the session right after connecting (the app may have exited immediately, or isn't installed in this VM). Run: dinghy sync   then try again; if it keeps happening: dinghy fix" };
         return { title: "Windows ended the session", message: `If you're signed in to the VM console (UTM) as ${winUser(cfg)}, sign out there: RemoteApp can't attach to a desktop session.` };
-    if (/0x1807|CREDSSP|SECURITY/i.test(log))
-        return { title: "Security error", message: "Windows refused the secure connection, usually because the VM clock drifted. Run \"dinghy doctor\", or restart the VM." };
-    if (/TRANSPORT_FAILED|Broken pipe|CONNECT_FAILED|0x0002000[0-9a-f]|timed out|refused/i.test(log))
-        return { title: "Lost the Windows VM", message: `Couldn't reach (or lost) the VM at ${cfg.host}. Is it running? Start it in UTM and try again.` };
-    if (/IDLE_TIMEOUT|LOGON_TIMEOUT/.test(log))
+    }
+    if (/0x0*1807|CREDSSP|ERRCONNECT_SECURITY|ERRCONNECT_TLS|SEC_E_/i.test(errs))
+        return { title: "Security error", message: "Windows refused the secure connection, usually because the VM clock drifted. Run: dinghy fix clock" };
+    if (/TRANSPORT_FAILED|Broken pipe|CONNECT_FAILED|ERRCONNECT_(DNS|CONNECT)|timed out|refused/i.test(errs))
+        return { title: "Lost the Windows VM", message: cfg.vmBackend === "qemu"
+            ? "Couldn't reach (or lost) the WinDinghy VM. Start it with: dinghy vm start   (then try again)."
+            : `Couldn't reach (or lost) the VM at ${cfg.host}. Is it running? Start it in UTM and try again.` };
+    if (/IDLE_TIMEOUT|LOGON_TIMEOUT/.test(errs))
         return { title: "Session timed out", message: "Windows ended the session because it was idle or the logon took too long." };
-    const last = log.split("\n").filter(l => /WINDINGHY-ERROR|\[ERROR\]/.test(l)).pop() ?? "";
-    return { title: "Connection failed", message: last.replace(/^\[[^\]]*\] \[[^\]]*\] /, "").slice(0, 400) || `The Windows connection ended unexpectedly (exit ${code}).` };
+    const last = errs.split("\n").filter(l => /WINDINGHY-ERROR/.test(l)).pop() ?? "";
+    const text = last.replace(/^.*WINDINGHY-ERROR:\s*/, "").replace(/\[0x[0-9a-f]+\]/gi, "").trim();
+    return { title: "Connection failed", message: (text ? `Windows said: ${text}` : `The Windows connection ended unexpectedly (exit ${code}).`).slice(0, 300) + "  (Show Log has the details.)" };
 }
 
 // Native error screen (AppleScript dialog with a caution icon).
@@ -915,8 +934,10 @@ function startSetupServer(cfg, ip, noBanner, log = true, guestUrl = null) {
                 try {
                     const b = JSON.parse(body);
                     fs.mkdirSync(CONFIG_DIR, { recursive: true });
-                    fs.writeFileSync(BANNER_PATH, JSON.stringify({ caption: String(b.caption ?? ""), text: String(b.text ?? "") }, null, 2) + "\n");
-                    if (log) console.log(`  [${new Date().toLocaleTimeString()}] guest reported its logon banner`);
+                    const caption = String(b.caption ?? ""), text = String(b.text ?? "");
+                    if (!caption && !text) fs.rmSync(bannerPath(cfg), { force: true });   // the guest has no banner
+                    else fs.writeFileSync(bannerPath(cfg), JSON.stringify({ caption, text }, null, 2) + "\n");
+                    if (log) console.log(`  [${new Date().toLocaleTimeString()}] guest reported its logon banner${caption || text ? "" : " (none)"}`);
                     res.writeHead(204);
                 } catch { res.writeHead(400); }
                 res.end();
