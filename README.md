@@ -1,163 +1,93 @@
 # WinDinghy
 
-Run Windows apps from a UTM virtual machine as if they were native macOS apps —
-each one gets a real `.app` in `~/Applications/WinDinghy` (Spotlight, Dock, Finder)
-that opens as its own window via RDP RemoteApp.
+Run Windows apps on your Mac as if they were Mac apps. Every Windows app gets a real `.app` in `~/Applications/WinDinghy`, available from Spotlight, the Dock and Finder, and opens in its own window.
 
-This reuses [WinBoat](https://github.com/TibixDev/winboat)'s guest agent (MIT,
-© TibixDev) inside the Windows VM, and replaces the Linux-only pieces (Docker
-backend, FreeRDP/X11 client) with UTM + Microsoft's **Windows App** as the
-display client.
+WinDinghy runs a lean Windows 11 (ARM64) virtual machine in the background (QEMU with Apple's Hypervisor.framework) and shows each program through RDP RemoteApp with a patched FreeRDP client. You never see the VM unless you want to.
 
-## How it works
+> **Independent project.** Not affiliated with, endorsed by, or approved by Microsoft or by WinBoat. You need your own Windows licence. Built on [WinBoat](https://github.com/TibixDev/winboat)'s guest agent: thank you, TibixDev. See [NOTICE.md](NOTICE.md).
 
-```
-┌─ macOS ──────────────────────────┐      ┌─ Windows VM (UTM) ─────────────┐
-│  dinghy sync ───────HTTP:7148──────────▶ │  WinBoat Guest Server (service)│
-│    │  app list + icons           │      │    - enumerates installed apps │
-│    ▼                             │      │                                │
-│  ~/Applications/WinDinghy/*.app  │      │  RDP host (RemoteApp/RAIL      │
-│    each wraps a .rdp file        │      │   unlocked via registry)       │
-│    │                             │      │                                │
-│    └─ open ▶ Windows App ──RDP:3389────▶ │  app renders as its own window │
-└──────────────────────────────────┘      └────────────────────────────────┘
-```
+## Quick start
 
-- The **guest server** (Go, built for Windows ARM64) runs as a service in the VM
-  and serves the installed-app list, icons, health, and metrics on port 7148.
-- `setup.ps1` enables the RDP host and flips the `TSAppAllowList` /
-  `fAllowUnlistedRemotePrograms` registry keys so **any** program can run as a
-  RemoteApp on Windows Pro — no RDS server needed.
-- `dinghy sync` turns each app into a small `.app` bundle containing a generated
-  `.rdp` file (`remoteapplicationmode:i:1`) that opens in **Windows App**.
-
-## Requirements
-
-- UTM (Other's may work but are untested) VM running Windows 11 **Pro/Enterprise/Education** (Home can't host RDP),
-  on a network the Mac can reach (UTM "Shared Network" works out of the box).
-- [Windows App](https://apps.apple.com/app/windows-app/id1295203466) (the former
-  Microsoft Remote Desktop) — already installed.
-- Node.js on the Mac (for the `dinghy` CLI).
-
-## Setup (one time)
-
-Using the menu-bar app: start the Windows VM, then choose **Set Up Windows
-VM…** from the WinDinghy menu (shown while the guest is unreachable, e.g. on
-first run). It displays the install command with the correct IP — run it inside
-Windows as described in step 2, and the first sync happens automatically.
-
-From the terminal instead:
-
-1. Start the Windows VM, then on the Mac:
-
-   ```sh
-   ./dinghy serve-setup
-   ```
-
-2. It prints a one-liner. In the VM, open **PowerShell as Administrator** and run:
-
-   ```powershell
-   irm http://192.168.64.1:8756/setup.ps1 | iex
-   ```
-
-   This enables RDP, unlocks RemoteApp, installs the guest server service, and
-   opens firewall ports. It's idempotent — safe to re-run.
-
-3. `dinghy serve-setup` detects the guest coming up and runs the first sync
-   automatically. Done — check `~/Applications/WinDinghy`.
-
-4. First launch only: Windows App will show a certificate warning (the VM uses a
-   self-signed RDP cert — accept it) and ask for your **Windows username and
-   password** (tick "save" so it goes into the Keychain). Set
-   `dinghy config username <user>` to pre-fill the username in generated files.
-
-## Daily use
+Needs an Apple Silicon Mac, Homebrew, Node.js, and about 64 GB of free disk space.
 
 ```sh
-./dinghy sync              # re-scan apps after installing something in Windows
-./dinghy launch "Excel"    # or just open the .app from Spotlight/Finder
-./dinghy desktop           # full Windows desktop session
-./dinghy status            # guest health, CPU/RAM, RDP reachability
-./dinghy config            # show config (~/.config/windinghy/config.json)
+git clone https://github.com/chrisskurda/windinghy.git ~/windinghy
+cd ~/windinghy && host/menubar/build.sh     # builds ~/Applications/WinDinghy.app
+open ~/Applications/WinDinghy.app
 ```
+
+Open WinDinghy from the menu bar, then choose **Set Up Windows**. It downloads the helpers, finds (or opens Microsoft's page for) the Windows ARM64 installer, installs Windows unattended, and syncs your apps. First run takes roughly 20-30 minutes. Everything is also available from the terminal: `dinghy vm create`.
+
+The tested Windows version is **Windows 11 24H2 (build 26100) ARM64**. Other versions ask for confirmation first. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+## The WinDinghy window
+
+| Section | What it does |
+|---|---|
+| **Apps** | Your Windows apps, plus the Windows Desktop. |
+| **Windows Desktop** | The full Windows desktop in its own window (can go full screen). |
+| **Windows Tools** | Control Panel, Device Manager, Event Viewer and other admin tools, kept apart from your apps. |
+| **Software** | Search and install software with winget. No Microsoft account or Store sign-in needed. |
+| **Account & Activation** | Check activation, enter a product key, open Microsoft account settings. |
+| **Work & School** | Join a domain, work or school account, refresh Group Policy. |
+| **Windows / Resources / Sharing / Snapshots / Storage & Backup** | Start, stop, restart; cores, memory, disk; clipboard, printers, audio, folders; restore points; move, export and import the VM. |
+| **General** | Menu-bar icon, login, updates, versions, credits. |
+
+## Sharing between Mac and Windows
+
+- Your **home folder** is shared by default (`\\tsclient\Home`).
+- **Documents, Downloads, Desktop, Pictures, Music and Videos** in Windows are your Mac's folders by default. Switch any of them off in Sharing.
+- Any share can be marked **Read-only**: Windows can look but not change. Enforced in the RDP client.
+- Clipboard, audio and printers are shared and can be turned off.
+
+## Everyday commands
+
+```sh
+dinghy sync                       # rescan apps after installing something in Windows
+dinghy launch "Excel"             # or open the .app from Spotlight
+dinghy pkg search firefox         # find software; then: dinghy pkg install Mozilla.Firefox
+dinghy vm snapshot before-office  # restore point; dinghy vm rewind before-office
+dinghy vm export ~/Backups/win.windinghyvm   # full image backup; dinghy vm import <bundle>
+dinghy folders status             # which Mac folders Windows uses
+dinghy about                      # versions vs tested versions
+dinghy fix                        # repair common problems
+```
+
+More in [docs/GUIDE.md](docs/GUIDE.md).
 
 ## Updating
 
-From the menu-bar app: **Check for Updates…**. From the terminal: `./dinghy
-update` (or `./update` directly). Either way it fetches `origin/main`,
-fast-forwards only (never touches a dirty tree or diverged local commits —
-it just tells you to resolve those by hand), rebuilds the menu-bar app, and
-relaunches it if it was running.
+General > **Check for Updates…**, or `dinghy update`. It fast-forwards the git checkout, rebuilds the RDP client if its patches changed, rebuilds the menu-bar app and relaunches it. It never touches a checkout with local changes or diverged commits; it shows you what to resolve. The updater logic is `host/dinghy-update.sh`, run through a gitignored copy at the repo root so a bad update can't break the thing that fixes it.
 
-The actual update logic lives in `host/dinghy-update.sh`, tracked in git like
-everything else. The thing you actually run is a copy of it installed at the
-repo root as `update` — gitignored on purpose, so that `git pull`/`reset`
-during an update can never delete or corrupt the one script whose job is
-recovering from a bad state; it re-syncs itself from the tracked copy on
-every run, so fixes to the update logic take effect automatically.
+## Advanced mode
 
-## Menu-bar app
+By default WinDinghy only supports its own managed VM. **Advanced mode** (General) unlocks UTM or another hypervisor, a Windows machine elsewhere on the network, and custom RDP clients. These aren't covered by the tested versions. Don't use a remote machine without an encrypted VPN.
 
-`host/menubar/build.sh` builds `~/Applications/WinDinghy.app`, a native menu-bar
-"Start button": VM online/offline status with live CPU/RAM, a Running section
-for open RemoteApp windows (count badge on the icon; window titles once you
-grant Screen Recording), an Apps submenu with icons, Sync Apps Now, Open
-Windows Desktop, Start Windows VM when it's offline, and a Start-at-Login
-toggle. Rebuild after `dinghy` changes: `./host/menubar/build.sh`.
+## Not possible yet
 
-Note: all RemoteApp windows belong to the single "Windows App" process, so
-the Dock can only ever show one icon for all of them — per-app running
-indicators live in this menu instead.
-
-## Launch behavior
-
-Launchers are dynamic: each `.app` calls `dinghy open-rdp`, which
-1. health-checks the configured VM address,
-2. if unreachable, **rescans the vmnet bridge subnets** for the guest API and
-   self-repairs the config (survives DHCP changes; adds ~10s to that launch),
-3. if nothing answers, **starts the UTM VM** (`dinghy config vmName` — default
-   "Windows") and waits up to 3 minutes for it to boot, with progress shown
-   as macOS notifications,
-4. then generates a fresh `.rdp` and hands it to Windows App.
-
-Sync filters out non-launchable noise (codec packs, runtimes, uninstallers);
-see everything with `dinghy config filter off` + re-sync.
-
-## Troubleshooting
-
-- **Error 0x1807 ("security error") even with correct credentials** — the
-  guest's RDP security layer is in a bad state; this has been seen after
-  abrupt VM shutdown/boot cycles. It is *not* a credential problem. Fix:
-  restart the VM (menu bar → Restart Windows VM, or quit UTM and start it
-  again).
-
-- **Auto-start doesn't kick in** — the first `utmctl` invocation may trigger a
-  macOS automation-permission prompt for UTM; approve it once. Check the VM
-  name matches: `dinghy config vmName`.
-- **RDP closed after setup** — the VM's network profile may be "Public" with
-  stricter rules; setup adds explicit any-profile rules, so re-run the
-  one-liner and check `Get-Service TermService`.
-- **App opens a full desktop instead of a window** — the RAIL registry keys
-  didn't take; re-run setup and sign out of any open RDP session once.
-- **Console shows lock screen while an app is open** — normal: an RDP
-  connection takes over the Windows session, so the UTM console window locks.
-  Use one or the other at a time.
-- **Performance** — give the VM more RAM (it's at 4 GB minimum recommended) in UTM settings. The generated .rdp files already use LAN-class
-  settings (no wallpaper/animations, auto-detect off, font smoothing on).
-  Windows App's RemoteApp path is much better than it was a few years ago,
-  and over the local vmnet there's no network bottleneck.
+- **Windows Desktop inside the main window.** It opens in its own window. Embedding needs an in-process RDP view.
+- **USB sharing.** Planned, using QEMU's USB passthrough.
+- **3D acceleration.** Windows on QEMU/HVF has no GPU driver, so graphics are software-rendered.
 
 ## Layout
 
 ```
-dinghy               CLI entry point (bash shim → host/dinghy.mjs)
-host/dinghy.mjs      the whole host-side tool (zero-dependency Node)
-host/dinghy-update.sh  update logic; installed as gitignored ./update, see "Updating"
-payload/         what gets installed into the VM at C:\Program Files\WinBoat
-  setup.ps1        guest configurator (served templated by `dinghy serve-setup`)
-  server/          winboat_guest_server.exe (Go, windows/arm64) + PS scripts
-  nssm.exe         service wrapper (SHA-1 verified against upstream)
+dinghy               CLI entry point
+host/dinghy.mjs      the host-side tool (zero-dependency Node)
+host/vm.mjs          QEMU VM management, unattended install, snapshots
+host/guest.mjs       talks to the guest (QEMU agent, or UTM in advanced mode)
+host/compat.json     the tested versions
+host/menubar/        the SwiftUI window and menu-bar app
+host/dinghy-update.sh  updater logic
+payload/             installed in the VM: setup.ps1 and WinBoat's guest server
+patches/ scripts/    the patched FreeRDP client and how to build it
+docs/                guide, compatibility, roadmap, design notes
 ```
 
-Guest agent source: [WinBoat `guest_server/`](https://github.com/TibixDev/winboat/tree/main/guest_server),
-built with `GOOS=windows GOARCH=arm64 go build ./cmd/server`.
+## Troubleshooting
+
+`dinghy doctor` checks the setup; `dinghy fix` repairs the usual problems (clock drift, saved login, permissions, VM address). Logs are in `~/.config/windinghy/logs/`.
+
+## Licence
+
+MIT. Parts derived from WinBoat are Copyright (c) 2026 TibixDev, MIT: see [LICENSE.winboat](LICENSE.winboat) and [NOTICE.md](NOTICE.md).

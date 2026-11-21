@@ -301,9 +301,10 @@ export function isoEditions(isoPath) {
             const xmlText = xmlBuf.toString("utf16le");
             const out = [];
             for (const m of xmlText.matchAll(/<IMAGE INDEX="(\d+)">([\s\S]*?)<\/IMAGE>/g)) {
+                const build = Number((m[2].match(/<BUILD>(\d+)<\/BUILD>/) ?? [])[1] ?? 0);
                 const name = (m[2].match(/<NAME>([^<]*)<\/NAME>/) ?? [])[1] ?? "";
                 const edition = (m[2].match(/<EDITIONID>([^<]*)<\/EDITIONID>/) ?? [])[1] ?? "";
-                out.push({ index: Number(m[1]), name, edition });
+                out.push({ index: Number(m[1]), name, edition, build });
             }
             return out;
         } finally { fs.closeSync(fd); }

@@ -17,7 +17,7 @@ mv windinghy-menubar "$APP/Contents/MacOS/"
 # App icon (regenerate from icon.svg with ./make-icon.sh)
 cp AppIcon.icns menubar-icon.svg "$APP/Contents/Resources/"
 # Bundle a copy of dinghy.mjs so Sync works even if the repo moves
-cp "$REPO_ROOT"/host/*.mjs "$APP/Contents/Resources/"   # dinghy, guest, vm, qga, ps-worker
+cp "$REPO_ROOT"/host/*.mjs "$REPO_ROOT"/host/compat.json "$APP/Contents/Resources/"   # dinghy, guest, vm, qga, ps-worker, tested versions
 # Guest payload (setup.ps1, guest server) so `dinghy setup` works from the app alone
 ditto "$REPO_ROOT/payload" "$APP/Contents/Resources/payload"
 

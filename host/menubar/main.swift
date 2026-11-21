@@ -1012,45 +1012,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     }
 
     @objc func checkForUpdates() {
+        guard !updating else { return }
         guard let root = findRepoRoot() else {
-            notify("WinDinghy checkout not found at ~/windinghy — can't check for updates.")
+            showUpdateResult("Can't find your WinDinghy checkout", "Updates come from the WinDinghy git folder (default ~/windinghy). Clone it there, or set DINGHY_PATH.")
             return
         }
         guard let launcherPath = installedUpdateLauncher(root: root) else {
-            notify("Updater script missing from this checkout — re-clone the repo.")
+            showUpdateResult("Updater missing", "host/dinghy-update.sh isn't in your checkout. Re-clone the repo.")
             return
         }
         updating = true
-        notify("Checking for updates…")
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [launcherPath]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        var output = ""
-        out.fileHandleForReading.readabilityHandler = { h in
-            if let s = String(data: h.availableData, encoding: .utf8) { output += s }
-        }
-        p.terminationHandler = { [weak self] proc in
-            out.fileHandleForReading.readabilityHandler = nil
+        AppStore.shared.updateStatus = "Checking for updates…"
+        DispatchQueue.global().async { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
+            p.arguments = [launcherPath]
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
+            p.environment = env
+            let out = Pipe()
+            p.standardOutput = out; p.standardError = out
+            do { try p.run() } catch {
+                DispatchQueue.main.async { self?.updating = false; AppStore.shared.updateStatus = nil; self?.showUpdateResult("Couldn't run the updater", error.localizedDescription) }
+                return
+            }
+            let data = out.fileHandleForReading.readDataToEndOfFile()   // read to EOF: no lost output
+            p.waitUntilExit()
+            let text = String(data: data, encoding: .utf8) ?? ""
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.updating = false
-                if output.contains("Already up to date") {
-                    self.notify("WinDinghy is already up to date.")
-                } else if proc.terminationStatus == 0 {
-                    self.notify("WinDinghy updated — relaunching…")
-                } else {
-                    let lastLine = output.split(separator: "\n").last.map(String.init) ?? "unknown error"
-                    self.notify("Update failed: \(lastLine)")
-                }
+                AppStore.shared.updateStatus = nil
+                let tail = text.split(separator: "\n").suffix(8).joined(separator: "\n")
+                if text.contains("Already up to date") { self.showUpdateResult("WinDinghy is up to date", tail) }
+                else if p.terminationStatus == 0 { self.showUpdateResult("WinDinghy was updated", tail) }
+                else { self.showUpdateResult("Update didn't finish", tail.isEmpty ? "Unknown error." : tail) }
             }
         }
-        do { try p.run() } catch {
-            updating = false
-            notify("Couldn't run updater: \(error.localizedDescription)")
-        }
+    }
+
+    /// A visible result: notifications from a menu-bar app are often switched off, which made the updater look dead.
+    func showUpdateResult(_ title: String, _ detail: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     // ---------- guest setup (serve install script) ----------

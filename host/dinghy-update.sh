@@ -45,6 +45,12 @@ if [ "$LOCAL" = "$REMOTE" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--check" ]; then
+    echo "An update is available:"
+    git log --oneline "HEAD..origin/$BRANCH" | head -20
+    exit 0
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
     echo "Local changes present — not updating automatically." >&2
     echo "Commit, stash, or discard them, then re-run." >&2
@@ -63,11 +69,21 @@ echo "Updating:"
 git log --oneline "HEAD..origin/$BRANCH"
 echo ""
 
+OLD_HEAD="$(git rev-parse HEAD)"
 git pull --ff-only --quiet origin "$BRANCH"
+CHANGED="$(git diff --name-only "$OLD_HEAD" HEAD)"
 NEW_VER="$(version)"
 sync_launcher  # the pull may have changed host/dinghy-update.sh itself
 
 echo "Updated v$OLD_VER -> v$NEW_VER"
+
+# A new FreeRDP patch or build recipe means the bundled client must be rebuilt first.
+if [ -d vendor/freerdp ] && echo "$CHANGED" | grep -qE '^(patches/|scripts/build-freerdp.sh|scripts/relocate-dylibs.py)'; then
+    echo "The RDP client changed; rebuilding it (a few minutes)..."
+    if ! scripts/build-freerdp.sh >/tmp/dinghy-update-freerdp.log 2>&1; then
+        echo "RDP client rebuild failed; see /tmp/dinghy-update-freerdp.log (the previous client keeps working)." >&2
+    fi
+fi
 
 if [ -f "host/menubar/build.sh" ]; then
     echo "Rebuilding the menu-bar app..."

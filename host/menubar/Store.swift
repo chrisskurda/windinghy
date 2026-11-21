@@ -138,7 +138,14 @@ final class AppStore: ObservableObject {
         for k in ["documents", "downloads", "desktop", "pictures", "music", "videos"] { d[k] = ConfigFile.bool("redirect_" + k, true) }
         return d
     }()
+    @Published var updateStatus: String? = nil
     @Published var redirectDirty = false
+    @Published var readOnly: Set<String> = Set((ConfigFile.dict()["readOnlyShares"] as? [String]) ?? [])
+    func isReadOnly(_ share: String) -> Bool { readOnly.contains(share) }
+    func setReadOnly(_ share: String, _ on: Bool) {
+        if on { readOnly.insert(share) } else { readOnly.remove(share) }
+        ConfigFile.set("readOnlyShares", Array(readOnly).sorted())
+    }
     @Published var folders: [String] { didSet { ConfigFile.set("sharedFolders", folders) } }
 
     // general
@@ -396,7 +403,7 @@ final class AppStore: ObservableObject {
     }
 
     /// Runs `dinghy vm create --progress …` and turns its PROGRESS lines into the setup screen.
-    func beginSetup() {
+    func beginSetup(allowUntested: Bool = false) {
         guard let node = findNode(), let dinghy = findDinghy() else {
             setupPhase = .failed("Can't find node or dinghy.mjs. Run `dinghy vm create` in a terminal instead.")
             return
@@ -404,6 +411,7 @@ final class AppStore: ObservableObject {
         setupPhase = .installing(pct: 1, title: "Preparing…")
         var args = [dinghy, "vm", "create", "--progress", "--disk", "\(diskGB)", "--ram", "\(ramGB * 1024)", "--cpus", "\(cores)"]
         args += ["--user", setupUser.isEmpty ? "WinDinghy" : setupUser]
+        if allowUntested { args.append("--allow-untested") }
         if let iso = setupISO { args += ["--iso", iso] }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: node)
@@ -440,7 +448,7 @@ final class AppStore: ObservableObject {
                     self.refresh()
                     self.setupPhase = .done(apps: self.apps.count)
                 } else {
-                    self.setupPhase = .failed(tail.suffix(3).joined(separator: "\n"))
+                    self.setupPhase = .failed(tail.filter { $0.contains("UNTESTED") }.first ?? tail.suffix(3).joined(separator: "\n"))
                 }
             }
         }
@@ -449,6 +457,7 @@ final class AppStore: ObservableObject {
 }
 
 struct KnownFolder { let key: String; let label: String; let mac: String
+    var share: String { key == "videos" ? "Movies" : mac }
     static let all = [
         KnownFolder(key: "documents", label: "Documents", mac: "Documents"),
         KnownFolder(key: "downloads", label: "Downloads", mac: "Downloads"),

@@ -39,6 +39,16 @@ final class ToolsStore: ObservableObject {
     @Published var workMessage: String? = nil
     @Published var workBusy = false
 
+    // about
+    @Published var about: [(String, String, String, Bool)] = []   // name, installed, tested, matches
+
+    func loadAbout() {
+        cli?.runDinghyCapture(["about", "--json"]) { [weak self] _, text in
+            guard let o = self?.json(text) as? [[String: Any]] else { return }
+            self?.about = o.map { ((($0["name"] as? String) ?? ""), (($0["have"] as? String) ?? ""), (($0["tested"] as? String) ?? ""), (($0["ok"] as? Bool) ?? true)) }
+        }
+    }
+
     // storage & backup
     @Published var storageBusy: String? = nil
     @Published var storageMessage: String? = nil
@@ -365,5 +375,39 @@ struct StorageView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - About & credits
+
+struct AboutSection: View {
+    @EnvironmentObject var tools: ToolsStore
+    @EnvironmentObject var store: AppStore
+    var body: some View {
+        Section("Versions") {
+            ForEach(tools.about, id: \.0) { row in
+                HStack {
+                    Text(row.0)
+                    Spacer()
+                    if !row.1.isEmpty { Text(row.1).foregroundStyle(row.3 ? Color.secondary : Color.orange).font(.system(size: 12, design: .monospaced)) }
+                }
+            }
+            if let s = store.updateStatus { HStack { ProgressView().controlSize(.small); Text(s).foregroundStyle(.secondary) } }
+            Text("Each release is tested against one Windows build, one QEMU and one FreeRDP client. Orange means what's installed differs from what was tested.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+        .onAppear { tools.loadAbout() }
+        Section("Credits & notices") {
+            Text("WinDinghy is an independent open-source project. It is not affiliated with, endorsed by, or sponsored by Microsoft or by the WinBoat project. Windows is a trademark of Microsoft Corporation. You need your own Windows licence.")
+                .font(.system(size: 12))
+            Text("Thank you to TibixDev and the WinBoat contributors: WinDinghy's guest agent is WinBoat's (MIT licence), and WinBoat's idea of Windows apps as native apps is what this project builds on. Thanks also to the FreeRDP and QEMU projects, and the Fedora virtio-win drivers.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            HStack {
+                Link("WinBoat", destination: URL(string: "https://github.com/TibixDev/winboat")!)
+                Link("FreeRDP", destination: URL(string: "https://www.freerdp.com")!)
+                Link("QEMU", destination: URL(string: "https://www.qemu.org")!)
+                Link("virtio-win", destination: URL(string: "https://github.com/virtio-win/kvm-guest-drivers-windows")!)
+            }.font(.system(size: 12))
+        }
     }
 }

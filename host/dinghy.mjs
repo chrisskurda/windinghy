@@ -31,7 +31,7 @@ import * as VM from "./vm.mjs";
 
 // Single source of truth for the WinDinghy version. Release: bump this,
 // move CHANGELOG "Unreleased" entries under the new version, tag vX.Y.Z.
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -58,6 +58,7 @@ const DEFAULTS = {
     sharePrinters: "off",
     shareAudio: "on",
     sharedFolders: [],
+    readOnlyShares: [],  // share names (Home, Documents, ...) served read-only to Windows
     advanced: "off",     // on: unlock unsupported setups (UTM or another hypervisor, remote hosts, custom clients)
     vmBackend: "utm",    // utm (a VM you run in UTM) or qemu (the VM WinDinghy manages: dinghy vm create)
     vmDir: "",           // where the managed VM lives (default ~/Library/Application Support/WinDinghy/vm)
@@ -119,6 +120,7 @@ function sanitizeConfig(cfg) {
     fix(cfg.nativeBin && !fs.existsSync(cfg.nativeBin), `nativeBin ${cfg.nativeBin} no longer exists (removed volume or build) -> use the bundled client`, () => { cfg.nativeBin = ""; });
     if (cfg.profiles === undefined) cfg.profiles = {};   // absent is normal (nothing saved yet)
     fix(!cfg.profiles || typeof cfg.profiles !== "object" || Array.isArray(cfg.profiles), "saved backend profiles were corrupt -> reset", () => { cfg.profiles = {}; });
+    fix(!Array.isArray(cfg.readOnlyShares) || cfg.readOnlyShares.some(x => typeof x !== "string"), "read-only share list was corrupt -> cleared", () => { cfg.readOnlyShares = []; });
     fix(typeof cfg.username !== "string", "username wasn't text -> cleared", () => { cfg.username = ""; });
     // Banner files from older VMs: drop any that are unreadable or hold no real text.
     for (const f of ["banner.json", "banner-qemu.json"]) {
@@ -843,7 +845,7 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
     const logFile = path.join(LOG_DIR, `${safeName(meta.Name ?? "desktop")}.log`);
     const fd = fs.openSync(logFile, "w");
     // Credentials go in over stdin (/args-from) so they never appear in `ps`.
-    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd], env: { ...process.env, WINDINGHY_APP_NAME: meta.Name ?? "Windows Desktop", WINDINGHY_NO_ERROR_DIALOGS: "1" } });
+    const child = spawn(bin, ["/args-from:stdin"], { detached: true, stdio: ["pipe", fd, fd], env: { ...process.env, WINDINGHY_RO_DRIVES: (Array.isArray(cfg.readOnlyShares) ? cfg.readOnlyShares : []).join(","), WINDINGHY_APP_NAME: meta.Name ?? "Windows Desktop", WINDINGHY_NO_ERROR_DIALOGS: "1" } });
     child.stdin.end(nativeArgs(cfg, meta, pw).join("\n") + "\n");
     child.unref();
     bumpUsage(meta.Name ?? "Windows Desktop");
@@ -1250,6 +1252,35 @@ function validWindowsUser(u) {
     return /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,19}$/.test(u) && !/[. ]$/.test(u) && !RESERVED_WIN_USERS.test(u) && !/^\d+$/.test(u);
 }
 
+
+// ---------- tested versions (host/compat.json) ----------
+function loadCompat() {
+    try { return JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "compat.json"), "utf8")); } catch { return {}; }
+}
+
+function windowsBuildTested(build) {
+    return (loadCompat().windows?.tested ?? []).some(t => t.build === build);
+}
+
+function cmdAbout(cfg, json) {
+    const c = loadCompat();
+    const r = (cmd, args) => { try { return spawnSync(cmd, args, { encoding: "utf8" }).stdout.trim(); } catch { return ""; } };
+    const q = (r("qemu-system-aarch64", ["--version"]).match(/version (\S+)/) ?? [])[1] ?? (r("/opt/homebrew/bin/qemu-system-aarch64", ["--version"]).match(/version (\S+)/) ?? [])[1] ?? "not installed";
+    const nb = nativeBin(cfg);
+    const fr = nb ? (r(nb, ["--version"]).match(/version (\S+)/) ?? [])[1] ?? "unknown" : "not built";
+    const rows = [
+        { name: "WinDinghy", have: VERSION, tested: c.windinghy ?? "", ok: VERSION === c.windinghy },
+        { name: "WinBoat guest agent (base)", have: c.winboat?.guestServer ?? "", tested: c.winboat?.base ?? "", ok: true, extra: `upstream latest seen ${c.winboat?.latestUpstreamSeen}` },
+        { name: "FreeRDP client", have: fr, tested: c.freerdp?.version ?? "", ok: fr === c.freerdp?.version },
+        { name: "QEMU", have: q, tested: c.qemu?.tested ?? "", ok: q === c.qemu?.tested },
+        { name: "Windows (recommended)", have: "", tested: c.windows?.recommended ?? "", ok: true },
+    ];
+    if (json) { console.log(JSON.stringify(rows)); return; }
+    say(`WinDinghy ${VERSION}, built on WinBoat's guest agent ${c.winboat?.base ?? "?"}`);
+    for (const x of rows) say(`${x.name.padEnd(30)} ${String(x.have).padEnd(14)} tested: ${x.tested}${x.have && !x.ok ? "   (differs from the tested version)" : ""}${x.extra ? "   " + x.extra : ""}`);
+    say("\nNot affiliated with Microsoft or WinBoat. See NOTICE.md for credits and trademarks.");
+}
+
 async function vmCreate(cfg, args) {
     const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
     // The app window reads these lines to draw its progress bar.
@@ -1276,6 +1307,12 @@ async function vmCreate(cfg, args) {
     const edition = VM.chooseEdition(editions);
     if (editions.length) say(`    editions: ${editions.map(e => `${e.index}=${e.name}`).join("; ")}`);
     say(`    installing: ${edition.name || "image " + edition.index}${edition.index !== 1 || editions.length > 1 ? ` (index ${edition.index})` : ""}`);
+    const c = loadCompat();
+    if (edition.build && !windowsBuildTested(edition.build) && !args.includes("--allow-untested")) {
+        const tested = (c.windows?.tested ?? []).map(t => t.name).join(", ");
+        throw new Error(`UNTESTED: this installer is Windows build ${edition.build}, which WinDinghy hasn't been tested with. Tested: ${tested}. It may still work, but expect surprises. To install it anyway: dinghy vm create --allow-untested`);
+    }
+    if (edition.build && windowsBuildTested(edition.build)) say(`    Windows build ${edition.build}: tested with this WinDinghy`);
     const virtio = await ensureVirtioIso();
 
     stepSay("Preparing the VM");
@@ -1701,6 +1738,16 @@ async function cmdFolders(cfg, args) {
         if (args.includes("--json")) console.log(JSON.stringify(rows)); else for (const r of rows) say(`${r.label.padEnd(10)} ${r.redirected ? "-> your Mac's" : "(Windows' own)"} ${r.mac}`);
         return;
     }
+    if (sub === "ro") {
+        const name = args[1], mode = args[2];
+        if (!name || !["on", "off"].includes(mode)) throw new Error("Usage: dinghy folders ro <share name, e.g. Home or Documents> <on|off>");
+        const set = new Set(Array.isArray(cfg.readOnlyShares) ? cfg.readOnlyShares : []);
+        if (mode === "on") set.add(name); else set.delete(name);
+        cfg.readOnlyShares = [...set];
+        saveConfig(cfg);
+        say(`${name}: ${mode === "on" ? "read-only" : "read and write"} (applies to the next app launch).`);
+        return;
+    }
     if (sub === "on" || sub === "off") {
         const which = args[1] === "all" ? KNOWN_FOLDERS : KNOWN_FOLDERS.filter(f => f.key === args[1]);
         if (!which.length) throw new Error(`Usage: dinghy folders ${sub} <${KNOWN_FOLDERS.map(f => f.key).join("|")}|all>`);
@@ -1709,7 +1756,7 @@ async function cmdFolders(cfg, args) {
         say(`${which.map(f => f.label).join(", ")}: ${sub === "on" ? "now Mac folders" : "back to Windows' own"}. Apply with: dinghy folders apply`);
         return;
     }
-    if (sub !== "apply") throw new Error("Usage: dinghy folders <status|on|off|apply> [--json]");
+    if (sub !== "apply") throw new Error("Usage: dinghy folders <status|on|off|ro|apply> [--json]");
     // Write each folder's location into the Windows user's registry. A new session picks it up, so the
     // user's Windows session is signed out afterwards (open Windows apps close).
     const vm = needAgent(cfg);
@@ -2091,6 +2138,8 @@ try {
         }
         case "setup":       await cmdSetup(cfg, rest); break;
         case "vm":          await cmdVm(cfg, rest); break;
+        case "about":
+        case "components":  cmdAbout(cfg, rest.includes("--json")); break;
         case "fix":         await cmdFix(cfg, rest); break;
         case "version":
         case "--version":
@@ -2107,6 +2156,13 @@ Usage:
   dinghy doctor               check mac-side + guest-side requirements
   dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)
   dinghy update               pull the latest WinDinghy from git and rebuild
+  dinghy about                versions installed vs the tested versions
+  dinghy pkg <search|list|install|uninstall|upgrade> ...   software via winget
+  dinghy folders <status|on|off|ro|apply>   Mac folders as Windows folders; read-only shares
+  dinghy activation [key <KEY>]   Windows activation status / enter a key
+  dinghy domain <status|join|leave|gpupdate>   work, school and domain
+  dinghy open-settings <page> open a Windows Settings page (workplace, yourinfo, activation...)
+  dinghy vm <move|export|import> ...   relocate, back up or restore the VM
   dinghy version              print the WinDinghy version`);
     }
 } catch (e) {

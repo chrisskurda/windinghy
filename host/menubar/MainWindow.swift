@@ -340,6 +340,7 @@ struct SharingView: View {
             Section {
                 Toggle(isOn: $store.shareClipboard) { Row("Clipboard", "Copy and paste between Mac and Windows apps.") }
                 Toggle(isOn: $store.shareHome) { Row("Home folder", "Your Mac home appears in Windows as \\\\tsclient\\Home.") }
+                if store.shareHome { ReadOnlyToggle(share: "Home") }
                 Toggle(isOn: $store.sharePrinters) { Row("Printers", "Use Mac printers from Windows apps.") }
                 Toggle(isOn: $store.shareAudio) { Row("Audio", "Play sound from Windows apps.") }
             } footer: {
@@ -351,6 +352,7 @@ struct SharingView: View {
                     Toggle(isOn: Binding(get: { store.redirects[f.key] ?? true }, set: { store.setRedirect(f.key, $0) })) {
                         Row(f.label, "Windows \(f.label) is your Mac's \(f.mac) folder.")
                     }
+                    if store.redirects[f.key] ?? true { ReadOnlyToggle(share: f.share) }
                 }
                 if store.redirectDirty {
                     HStack {
@@ -376,6 +378,7 @@ struct SharingView: View {
                         Image(systemName: "arrow.right").foregroundStyle(.secondary).font(.system(size: 10))
                         Text("\\\\tsclient\\\(URL(fileURLWithPath: path).lastPathComponent)").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                         Spacer()
+                        Toggle("Read-only", isOn: Binding(get: { store.isReadOnly(URL(fileURLWithPath: path).lastPathComponent) }, set: { store.setReadOnly(URL(fileURLWithPath: path).lastPathComponent, $0) })).toggleStyle(.checkbox)
                         Button { store.folders.removeAll { $0 == path } } label: { Image(systemName: "minus.circle") }.buttonStyle(.borderless)
                     }
                 }
@@ -396,6 +399,15 @@ struct SharingView: View {
         if panel.runModal() == .OK {
             for u in panel.urls where !store.folders.contains(u.path) { store.folders.append(u.path) }
         }
+    }
+}
+
+struct ReadOnlyToggle: View {
+    @EnvironmentObject var store: AppStore
+    let share: String
+    var body: some View {
+        Toggle("Read-only: Windows can look but not change", isOn: Binding(get: { store.isReadOnly(share) }, set: { store.setReadOnly(share, $0) }))
+            .toggleStyle(.checkbox).font(.system(size: 12)).padding(.leading, 18)
     }
 }
 
@@ -501,6 +513,7 @@ struct GeneralView: View {
                     Button("Show VM Folder") { store.delegate?.openVMFolder() }
                 }
             }
+            AboutSection()
             Section {
                 Toggle("Advanced mode", isOn: Binding(get: { store.advanced }, set: { _ in store.delegate?.toggleAdvanced() }))
             } footer: {
@@ -552,6 +565,8 @@ struct SetupView: View {
             Button("Customize…") { store.setupPhase = .customize }.buttonStyle(.link)
             Text("Downloads about 1 GB, plus the Windows installer (about 5 GB). Needs 64 GB free disk space.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Independent project: not affiliated with or endorsed by Microsoft or WinBoat. You need your own Windows licence.")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
         case .customize?:
             Text("Customize").font(.system(size: 22, weight: .bold))
             Form {
@@ -582,10 +597,19 @@ struct SetupView: View {
             Button("Show My Apps") { store.setupPhase = nil; store.screen = .apps; store.refresh() }.buttonStyle(.borderedProminent).controlSize(.large)
             Text("The first launch asks for your Windows password once. It is saved to Keychain.").font(.system(size: 11)).foregroundStyle(.secondary)
         case .failed(let msg)?:
-            Text("Setup didn't finish").font(.system(size: 22, weight: .bold))
-            Text(msg).font(.system(size: 13)).foregroundStyle(.secondary).textSelection(.enabled)
-            HStack {
-                Button("Try Again") { store.setupPhase = .welcome }.buttonStyle(.borderedProminent)
+            if msg.contains("UNTESTED") {
+                Text("This Windows version isn't tested").font(.system(size: 22, weight: .bold))
+                Text(msg.replacingOccurrences(of: "UNTESTED: ", with: "")).font(.system(size: 13)).foregroundStyle(.secondary).textSelection(.enabled)
+                HStack {
+                    Button("Choose Another…") { store.chooseISO(); store.setupPhase = .customize }
+                    Button("Install Anyway") { store.beginSetup(allowUntested: true) }.buttonStyle(.borderedProminent)
+                }
+            } else {
+                Text("Setup didn't finish").font(.system(size: 22, weight: .bold))
+                Text(msg).font(.system(size: 13)).foregroundStyle(.secondary).textSelection(.enabled)
+                HStack {
+                    Button("Try Again") { store.setupPhase = .welcome }.buttonStyle(.borderedProminent)
+                }
             }
         }
     }

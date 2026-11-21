@@ -1,3 +1,101 @@
+diff --git a/channels/drive/client/drive_main.c b/channels/drive/client/drive_main.c
+index 36f1710..a84fe4d 100644
+--- a/channels/drive/client/drive_main.c
++++ b/channels/drive/client/drive_main.c
+@@ -54,6 +54,7 @@ typedef struct
+ 
+ 	WCHAR* path;
+ 	BOOL automount;
++	BOOL readOnly; /* WinDinghy: share listed in WINDINGHY_RO_DRIVES is read-only */
+ 	UINT32 PathLength;
+ 	wListDictionary* files;
+ 
+@@ -150,6 +151,28 @@ static DRIVE_FILE* drive_get_file_by_id(DRIVE_DEVICE* drive, UINT32 id)
+ 	return file;
+ }
+ 
++
++/* WinDinghy: drives named in WINDINGHY_RO_DRIVES (comma separated) are served read-only. */
++static BOOL drive_name_is_read_only(const char* name)
++{
++	const char* env = getenv("WINDINGHY_RO_DRIVES");
++	if (!env || !name)
++		return FALSE;
++	const size_t n = strlen(name);
++	const char* p = env;
++	while (*p)
++	{
++		const char* e = strchr(p, ',');
++		const size_t len = e ? (size_t)(e - p) : strlen(p);
++		if (len == n && _strnicmp(p, name, n) == 0)
++			return TRUE;
++		if (!e)
++			break;
++		p = e + 1;
++	}
++	return FALSE;
++}
++
+ /**
+  * Function description
+  *
+@@ -180,13 +203,22 @@ static UINT drive_process_irp_create(DRIVE_DEVICE* drive, IRP* irp)
+ 
+ 	const WCHAR* path = Stream_ConstPointer(irp->input);
+ 	UINT32 FileId = irp->devman->id_sequence++;
++	/* Read-only share: refuse anything that could change the file or directory. */
++	const UINT32 WRITE_BITS = 0x00000002 /* FILE_WRITE_DATA */ | 0x00000004 /* FILE_APPEND_DATA */ |
++	                          0x00000010 /* FILE_WRITE_EA */ | 0x00010000 /* DELETE */ |
++	                          0x40000000 /* GENERIC_WRITE */ | 0x10000000 /* GENERIC_ALL */;
++	const BOOL denyWrite = drive->readOnly && ((DesiredAccess & WRITE_BITS) != 0 ||
++	                                           CreateDisposition != FILE_OPEN ||
++	                                           (CreateOptions & FILE_DELETE_ON_CLOSE) != 0);
+ 	DRIVE_FILE* file =
+-	    drive_file_new(drive->path, path, PathLength / sizeof(WCHAR), FileId, DesiredAccess,
+-	                   CreateDisposition, CreateOptions, FileAttributes, SharedAccess);
++	    denyWrite ? nullptr
++	              : drive_file_new(drive->path, path, PathLength / sizeof(WCHAR), FileId,
++	                               DesiredAccess, CreateDisposition, CreateOptions, FileAttributes,
++	                               SharedAccess);
+ 
+ 	if (!file)
+ 	{
+-		irp->IoStatus = drive_map_windows_err(GetLastError());
++		irp->IoStatus = denyWrite ? STATUS_ACCESS_DENIED : drive_map_windows_err(GetLastError());
+ 		FileId = 0;
+ 		Information = 0;
+ 	}
+@@ -363,6 +395,11 @@ static UINT drive_process_irp_write(DRIVE_DEVICE* drive, IRP* irp)
+ 		irp->IoStatus = STATUS_UNSUCCESSFUL;
+ 		Length = 0;
+ 	}
++	else if (drive->readOnly)
++	{
++		irp->IoStatus = STATUS_ACCESS_DENIED;
++		Length = 0;
++	}
+ 	else if (!drive_file_seek(file, Offset))
+ 	{
+ 		irp->IoStatus = drive_map_windows_err(GetLastError());
+@@ -439,6 +476,10 @@ static UINT drive_process_irp_set_information(DRIVE_DEVICE* drive, IRP* irp)
+ 	{
+ 		irp->IoStatus = STATUS_UNSUCCESSFUL;
+ 	}
++	else if (drive->readOnly)
++	{
++		irp->IoStatus = STATUS_ACCESS_DENIED; /* rename, delete, resize, attribute changes */
++	}
+ 	else if (!drive_file_set_information(file, FsInformationClass, Length, irp->input))
+ 	{
+ 		irp->IoStatus = drive_map_windows_err(GetLastError());
+@@ -1008,6 +1049,7 @@ static UINT drive_register_drive_path(PDEVICE_SERVICE_ENTRY_POINTS pEntryPoints,
+ 		drive->device.Free = drive_free;
+ 		drive->rdpcontext = pEntryPoints->rdpcontext;
+ 		drive->automount = automount;
++		drive->readOnly = drive_name_is_read_only(name);
+ 		length = strlen(name);
+ 		drive->device.data = Stream_New(nullptr, length + 1);
+ 
 diff --git a/client/SDL/SDL3/sdl_context.cpp b/client/SDL/SDL3/sdl_context.cpp
 index bcb37bf..c45876d 100644
 --- a/client/SDL/SDL3/sdl_context.cpp

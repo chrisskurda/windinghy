@@ -10,6 +10,17 @@ bumps may include breaking changes).
 
 ### Added
 
+- Read-only shares: a per-share switch in Sharing (`dinghy folders ro <name> on|off`), enforced in the patched FreeRDP drive channel (`WINDINGHY_RO_DRIVES`). Verified against the live VM: reads work, writes are denied, other shares stay writable.
+- `host/compat.json` pins the tested set (Windows 11 24H2 build 26100 ARM64, WinBoat base v0.9.0, FreeRDP commit, QEMU 11.1.3). `dinghy about` and General show installed vs tested.
+- Installing a Windows build outside the tested list warns first (setup window: Choose Another / Install Anyway; CLI: `--allow-untested`).
+- NOTICE.md (not affiliated with Microsoft or WinBoat, credit and thanks to WinBoat, dependencies, licensing), plus in-app credits and a setup-window notice. docs/COMPATIBILITY.md and docs/GUIDE.md; README rewritten for the managed VM.
+
+### Fixed
+
+- Updater: results now appear in a window (notifications were silently dropped), output is no longer lost, ssh/git can't hang on a prompt, and the RDP client is rebuilt when its patches change. `./update --check` lists what's pending.
+
+### Added
+
 - Windows folders (Documents, Downloads, Desktop, Pictures, Music, Videos) redirect to the Mac's equivalents by default, each with a switch in Sharing; `dinghy folders status|on|off|apply`. The home folder stays shared by default.
 - Setup wizard asks for the Windows account name (default: your macOS username); `dinghy vm create --user`.
 - Windows tools (Control Panel, Device Manager, Event Viewer, ...) are classified at sync (`Category` in app.json) and live in their own Windows Tools pane, keeping Apps for user apps. "Windows Desktop" is in the Apps list and has its own pane.
