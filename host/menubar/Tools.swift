@@ -210,17 +210,51 @@ final class ToolsStore: ObservableObject {
         run("Importing…", ["vm", "import", url.path], "Imported. Start Windows, then save its password once: dinghy login")
     }
 
+    @Published var removePct: Double? = nil
+    @Published var removeTitle = ""
+
+    /// Runs `dinghy uninstall --progress` and shows its PROGRESS lines. When it finishes, the main window
+    /// notices there's no VM and goes back to the setup wizard.
     func uninstall(cache: Bool, settings: Bool, done: @escaping (Bool) -> Void) {
-        var args = ["uninstall", "--yes"]
+        guard let node = findNode(), let dinghy = findDinghy() else { storageMessage = "Can't find node or dinghy.mjs."; return }
+        var args = [dinghy, "uninstall", "--yes", "--progress"]
         if cache { args.append("--purge-cache") }
         if settings { args.append("--purge-settings") }
-        storageBusy = "Removing Windows…"; storageMessage = nil
-        cli?.runDinghyCapture(args) { [weak self] status, text in
-            self?.storageBusy = nil
-            self?.storageMessage = status == 0 ? "Windows was removed from this Mac." : (text.split(separator: "\n").last.map(String.init) ?? "That didn't work.")
-            AppStore.shared.refresh()
-            done(status == 0)
+        removePct = 1; removeTitle = "Preparing…"; storageMessage = nil
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe; p.standardError = pipe
+        var buffer = ""
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            guard !d.isEmpty, let chunk = String(data: d, encoding: .utf8) else { return }
+            buffer += chunk
+            while let nl = buffer.firstIndex(of: "\n") {
+                let line = String(buffer[buffer.startIndex..<nl])
+                buffer = String(buffer[buffer.index(after: nl)...])
+                if line.hasPrefix("PROGRESS:") {
+                    let parts = line.dropFirst(9).split(separator: ":", maxSplits: 1).map(String.init)
+                    if parts.count == 2, let pct = Double(parts[0]) {
+                        DispatchQueue.main.async { self?.removePct = pct; self?.removeTitle = parts[1] }
+                    }
+                }
+            }
         }
+        p.terminationHandler = { [weak self] proc in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                self?.removePct = nil
+                self?.storageMessage = proc.terminationStatus == 0 ? nil : "Removing Windows didn't finish. Run: dinghy uninstall --yes"
+                AppStore.shared.refresh()
+                done(proc.terminationStatus == 0)
+            }
+        }
+        do { try p.run() } catch { removePct = nil; storageMessage = error.localizedDescription }
     }
 
     private func run(_ title: String, _ args: [String], _ ok: String) {
@@ -422,6 +456,15 @@ struct StorageView: View {
     @StateObject private var sheet = Box<ResetKind?>(nil)
     var body: some View {
         Form {
+            if let pct = tools.removePct {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(tools.removeTitle).font(.system(size: 15, weight: .semibold))
+                        ProgressView(value: pct / 100).progressViewStyle(.linear)
+                        Text("\(Int(pct))%").font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                } header: { Text("Removing Windows") }
+            }
             Section {
                 HStack {
                     Text(ConfigFile.string("vmDir", "~/Library/Application Support/WinDinghy/vm").replacingOccurrences(of: NSHomeDirectory(), with: "~"))
@@ -443,7 +486,7 @@ struct StorageView: View {
             Section {
                 HStack { Row("Rewind to clean install", "Go back to the restore point taken right after setup."); Spacer(); Button("Rewind…") { sheet.value = .rewind }.disabled(store.snapshotBusy || !store.snapshots.contains { $0.name == "clean-install" }) }
                 HStack { Row("Reinstall Windows", "Delete this Windows and set up a fresh one."); Spacer(); Button("Reinstall…") { sheet.value = .reinstall }.disabled(tools.storageBusy != nil) }
-                HStack { Row("Remove Windows", "Delete the VM, its password and launchers from this Mac."); Spacer(); Button("Remove…") { sheet.value = .uninstall }.disabled(tools.storageBusy != nil) }
+                HStack { Row("Remove Windows", "Delete the VM, its password and launchers from this Mac."); Spacer(); Button("Remove…") { sheet.value = .uninstall }.disabled(tools.storageBusy != nil || tools.removePct != nil) }
             } header: { Text("Reset & uninstall") } footer: {
                 Text("None of these touch your Mac's own files. Export first if you might want Windows back.").font(.system(size: 12)).foregroundStyle(.secondary)
             }

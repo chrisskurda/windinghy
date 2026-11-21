@@ -211,10 +211,11 @@ final class AppStore: ObservableObject {
         let c = cfg
         let fm = FileManager.default
         let managed = c.vmBackend == "qemu"
-        let diskPath = NSString(string: "~/Library/Application Support/WinDinghy/vm/disk.qcow2").expandingTildeInPath
-        // "No VM yet" means the first-run flow: no managed VM and nothing configured for another backend.
-        vmExists = managed ? fm.fileExists(atPath: diskPath) : true
-        if !vmExists && setupPhase == nil { setupPhase = .welcome }
+        let diskPath = c.vmDir + "/disk.qcow2"
+        // Without a managed VM, the only supported next step is the setup wizard. Other backends (UTM, a
+        // remote host) are advanced-mode setups, so outside advanced mode they don't count as "a VM".
+        vmExists = managed ? fm.fileExists(atPath: diskPath) : (c.advanced == "on")
+        if !vmExists && setupPhase == nil && ToolsStore.shared.removePct == nil { setupPhase = .welcome }   // not mid-removal: the progress bar stays up until it finishes
         if vmExists, !Self.debugSetup, case .welcome? = setupPhase { setupPhase = nil }
 
         if tick % 3 == 1 { apps = listApps(c) }

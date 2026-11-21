@@ -1463,13 +1463,16 @@ async function vmImport(cfg, src) {
 async function vmReinstall(cfg, args) {
     if (!args.includes("--yes")) throw new Error("This deletes the current Windows VM and installs a fresh one. Re-run with --yes to confirm (add --backup <path> to save a copy first).");
     if (!VM.exists(cfg)) throw new Error("There's no managed VM to reinstall. Use: dinghy vm create");
+    const prog = (pct, t) => { if (args.includes("--progress")) console.log(`PROGRESS:${pct}:${t}`); };
     const bi = args.indexOf("--backup");
+    prog(1, bi >= 0 ? "Saving a safety copy…" : "Preparing…");
     if (bi >= 0) {
         if (!args[bi + 1]) throw new Error("--backup needs a path.");
         vmExport(cfg, args[bi + 1]);
     }
     const wasUser = (cfg.username ?? "").split("\\").pop();
     say("Removing the old VM...");
+    prog(3, "Removing the old Windows…");
     VM.destroy(cfg);
     if (wasUser) keychainDelete(wasUser);
     const forward = ["--progress", "--allow-untested"].filter(a => args.includes(a));
@@ -1491,10 +1494,15 @@ async function cmdUninstall(cfg, args) {
         say(`This will remove:\n  - the Windows VM and its snapshots (${gb} GB)\n  - the saved Windows password (Keychain)\n  - the app launchers in ${cfg.appsDir}${cache ? "\n  - cached helper downloads (virtio drivers)" : ""}${settings ? "\n  - WinDinghy's settings and logs" : ""}\nYour Mac files, exported backups and the Windows ISO are not touched.\nRe-run with --yes to do it. Options: --purge-cache  --purge-settings`);
         return;
     }
-    if (VM.exists(cfg) || VM.isRunning(cfg)) { say("Removing the Windows VM..."); VM.destroy(cfg); }
+    const progress = (pct, title) => { if (args.includes("--progress")) console.log(`PROGRESS:${Math.round(pct)}:${title}`); };
+    progress(3, "Preparing…");
+    if (VM.isRunning(cfg)) { say("Shutting down Windows..."); progress(8, "Shutting down Windows…"); VM.stop(cfg, 60); }
+    if (VM.exists(cfg) || VM.isRunning(cfg)) { say("Removing the Windows VM..."); progress(40, "Deleting the Windows disk…"); VM.destroy(cfg); }
+    progress(60, "Removing the saved password…");
     const user = (cfg.username ?? "").split("\\").pop();
     if (user) keychainDelete(user);
     // Launchers: only folders that carry our app.json
+    progress(70, "Removing app launchers…");
     try {
         for (const n of fs.readdirSync(cfg.appsDir)) {
             const d = path.join(cfg.appsDir, n);
@@ -1502,8 +1510,10 @@ async function cmdUninstall(cfg, args) {
         }
         try { fs.rmdirSync(cfg.appsDir); } catch {}
     } catch {}
-    if (cache) { try { fs.rmSync(VM.cacheDir(), { recursive: true, force: true }); } catch {} }
+    if (cache) { progress(85, "Removing cached downloads…"); try { fs.rmSync(VM.cacheDir(), { recursive: true, force: true }); } catch {} }
+    progress(95, "Finishing…");
     if (settings) { try { fs.rmSync(CONFIG_DIR, { recursive: true, force: true }); } catch {} }
+    progress(100, "Done");
     say("Done. WinDinghy's Windows is gone from this Mac.");
     say("To finish removing WinDinghy itself, delete ~/Applications/WinDinghy.app and the windinghy folder.");
 }

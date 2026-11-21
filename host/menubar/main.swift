@@ -17,6 +17,7 @@ struct WBConfig {
     var username = ""
     var promptcreds = "on"
     var appsDir = NSString(string: "~/Applications/WinDinghy").expandingTildeInPath
+    var vmDir = NSString(string: "~/Library/Application Support/WinDinghy/vm").expandingTildeInPath
 
     static let path = NSString(string: "~/.config/windinghy/config.json").expandingTildeInPath
 
@@ -34,6 +35,7 @@ struct WBConfig {
         if let v = json["username"] as? String { c.username = v }
         if let v = json["promptcreds"] as? String, !v.isEmpty { c.promptcreds = v }
         if let v = json["appsDir"] as? String, !v.isEmpty { c.appsDir = v }
+        if let v = json["vmDir"] as? String, !v.isEmpty { c.vmDir = NSString(string: v).expandingTildeInPath }
         return c
     }
 

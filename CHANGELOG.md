@@ -14,6 +14,7 @@ bumps may include breaking changes).
 
 ### Fixed
 
+- Removing Windows shows a progress bar, and afterwards the window offers only the setup wizard instead of settings that can't work without a VM. Without a managed VM, the window goes to setup unless advanced mode is on; a custom VM folder is honored.
 - Deleting a VM only removes the files WinDinghy created, so a custom VM folder that holds anything else is never wiped.
 
 ## [0.2.0] - 2026-11-20
