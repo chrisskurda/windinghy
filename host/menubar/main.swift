@@ -212,6 +212,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     let menu = NSMenu()
     var cfg = WBConfig.load()
     var online = false
+    var vmPaused = false          // the VM process is alive but frozen by the idle action
+    var idleSince: Date? = nil
+    var idleHandled = false
+    var quittingVM = false
     var metricsLine = ""
     var syncing = false
     var updating = false
@@ -454,6 +458,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         poll()
         updateBadge()
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.poll() }
+        autoStartVM()
         // macOS App Management: WinDinghy must be allowed to update its app launchers. Ask once a day.
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in self?.requestAppManagement() }
         // A sleeping Mac pauses the VM, so its clock falls behind; push the Mac's time in once we're awake.
@@ -481,10 +486,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     func poll() {
         cfg = WBConfig.load()  // pick up dinghy's self-repaired host
         refreshSnapshots()
+        vmPaused = vmProcessAlive() && FileManager.default.fileExists(atPath: cfg.vmDir + "/qemu.paused")
         fetchJSON("/health") { [weak self] health in
             guard let self else { return }
             self.online = health?["status"] as? String == "ok"
             self.updateBadge()
+            self.checkIdle()
             if self.online {
                 self.fetchJSON("/metrics") { [weak self] m in
                     guard let self, let m else { return }
@@ -496,7 +503,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 }
             } else {
                 self.metricsLine = ""
-                self.rediscoverGuest()
+                if !self.vmPaused { self.rediscoverGuest() }   // a frozen VM isn't lost
             }
         }
     }
@@ -656,7 +663,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     func rebuildMenu() {
         menu.removeAllItems()
 
-        let status = NSMenuItem(title: online ? "Windows is running" : "Windows is off", action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: online ? "Windows is running" : (vmPaused ? "Windows is paused" : "Windows is off"), action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
         if online && !metricsLine.isEmpty {
@@ -664,7 +671,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             m.isEnabled = false
             menu.addItem(m)
         } else if !online {
-            let hint = NSMenuItem(title: "Starts when you open an app", action: nil, keyEquivalent: "")
+            let hint = NSMenuItem(title: vmPaused ? "Wakes when you open an app" : "Starts when you open an app", action: nil, keyEquivalent: "")
             hint.isEnabled = false
             menu.addItem(hint)
         }
@@ -732,7 +739,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
                 none.isEnabled = false
                 items.append(none)
             }
-            for app in hits { items.append(appItem(app)) }
+            for app in hits { items.append(contentsOf: appItems(app)) }
             return items
         }
 
@@ -746,7 +753,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             let header = NSMenuItem(title: "Favorites", action: nil, keyEquivalent: "")
             header.isEnabled = false
             items.append(header)
-            for app in favs { items.append(appItem(app)) }
+            for app in favs { items.append(contentsOf: appItems(app)) }
         }
 
         // All apps grouped by source category
@@ -760,7 +767,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             placedKeys.insert(key)
             let catItem = NSMenuItem(title: "\(label) (\(group.count))", action: nil, keyEquivalent: "")
             let catSub = NSMenu()
-            for app in group { catSub.addItem(appItem(app)) }
+            for app in group { appItems(app).forEach { catSub.addItem($0) } }
             catItem.submenu = catSub
             allSub.addItem(catItem)
         }
@@ -769,7 +776,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             let catItem = NSMenuItem(title: "Other (\(leftovers.count))", action: nil, keyEquivalent: "")
             let catSub = NSMenu()
             for app in leftovers.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
-                catSub.addItem(appItem(app))
+                appItems(app).forEach { catSub.addItem($0) }
             }
             catItem.submenu = catSub
             allSub.addItem(catItem)
@@ -794,13 +801,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         }
     }
 
+    /// One row per app. It's a custom view so it can see right-clicks, which plain menu rows ignore:
+    /// click opens, ⌥-click or right-click offers Run as Administrator (see AppRowView).
+    func appItems(_ app: AppEntry) -> [NSMenuItem] { [appItem(app)] }
+
     func appItem(_ app: AppEntry) -> NSMenuItem {
-        let item = NSMenuItem(title: app.name, action: #selector(launchApp(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: app.name, action: #selector(launchApp(_:)), keyEquivalent: "")   // keyboard Return
         item.target = self
         item.representedObject = app.path
         let icon = NSWorkspace.shared.icon(forFile: app.path)
         icon.size = NSSize(width: 16, height: 16)
-        item.image = icon
+        let row = AppRowView(name: app.name, icon: icon)
+        let path = app.path
+        row.blocker = AppStore.shared.adminBlocker(forAppAt: path)
+        row.onOpen = { NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: .init()) }
+        row.onAdmin = { AppStore.shared.launchAsAdmin(appAt: path) }
+        item.view = row
         return item
     }
 
@@ -818,6 +834,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     }
 
     // ---------- actions ----------
+
+    @objc func launchAppAdmin(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        AppStore.shared.launchAsAdmin(appAt: path)
+    }
 
     @objc func launchApp(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String else { return }
@@ -1102,6 +1123,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         w.run(node: node, dinghy: dinghy, args: args)
     }
 
+    // ---------- VM power: start with the app, save on quit, idle ----------
+
+    func vmProcessAlive() -> Bool {
+        guard let txt = try? String(contentsOfFile: cfg.vmDir + "/qemu.pid", encoding: .utf8),
+              let pid = Int32(txt.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return kill(pid, 0) == 0
+    }
+
+    /// Opened by the "start at login" item (or soon after the Mac booted)? Then the VM start is delayed.
+    func launchedAtLogin() -> Bool {
+        if ProcessInfo.processInfo.systemUptime < 600 { return true }
+        let ev = NSAppleEventManager.shared().currentAppleEvent
+        return ev?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
+    }
+
+    func autoStartVM() {
+        guard cfg.vmBackend == "qemu", ConfigFile.bool("vmAutoStart", true), AppStore.shared.vmExists else { return }
+        var args = ["vm", "autostart"]
+        if launchedAtLogin() { args.append("--login") }
+        runDinghyBackground(args) { [weak self] status, last in
+            if status != 0 { self?.notify("Couldn't start Windows: \(last)") }
+            self?.poll()
+        }
+    }
+
+    /// No Windows apps open for a while: pause / save / shut down, per the setting.
+    func checkIdle() {
+        let action = ConfigFile.string("vmIdleAction", "off")
+        guard cfg.vmBackend == "qemu", action != "off", online else { idleSince = nil; return }
+        if !AppStore.shared.runningAppNames(cfg).isEmpty { idleSince = nil; idleHandled = false; return }
+        if idleSince == nil { idleSince = Date() }
+        let limit = Double(ConfigFile.int("vmIdleMinutes", 15)) * 60
+        guard !idleHandled, let since = idleSince, Date().timeIntervalSince(since) >= limit else { return }
+        idleHandled = true
+        runDinghyBackground(["vm", "idle"]) { [weak self] _, last in
+            if last.hasPrefix("WARN:") { self?.notify(last) }
+            self?.poll()
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let how = ConfigFile.string("vmOnQuit", "save")
+        // Never touch the VM while a setup/install is running, or if there's nothing to do.
+        let installing: Bool = { if case .installing? = AppStore.shared.setupPhase { return true }; return false }()
+        guard cfg.vmBackend == "qemu", how != "keep", !quittingVM, !installing, runWindow?.process?.isRunning != true,
+              vmProcessAlive(), let node = findNode(), let dinghy = findDinghy() else { return .terminateNow }
+        quittingVM = true
+        notify(how == "save" ? "Saving Windows before quitting…" : "Shutting Windows down before quitting…")
+        // Open Windows apps die with the VM; close them cleanly first.
+        for app in NSWorkspace.shared.runningApplications where app.bundleURL?.path.hasPrefix(cfg.appsDir + "/") == true { app.terminate() }
+        DispatchQueue.global().async { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: node)
+            p.arguments = [dinghy, "vm", "quit"]
+            let pipe = Pipe()
+            p.standardOutput = pipe; p.standardError = pipe
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            p.environment = env
+            var out = ""
+            if (try? p.run()) != nil {
+                // Don't hold the app hostage forever (a save of 6+ GB takes under a minute; 5 min is generous).
+                let timer = DispatchSource.makeTimerSource(queue: .global())
+                timer.schedule(deadline: .now() + 300)
+                timer.setEventHandler { if p.isRunning { p.terminate() } }
+                timer.resume()
+                out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                p.waitUntilExit()
+                timer.cancel()
+            }
+            if let warn = out.split(separator: "\n").first(where: { $0.hasPrefix("WARN:") }) {
+                DispatchQueue.main.async { self?.notify(String(warn)) }
+                usleep(300_000)
+            }
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ n: Notification) {
         runWindow?.process?.terminate()
     }
@@ -1130,8 +1230,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             check(nativeClient || fm.fileExists(atPath: "/Applications/Windows App.app"), "RDP client available",
                   "Rebuild WinDinghy (host/menubar/build.sh builds the native client), or install \"Windows App\" from the Mac App Store.")
             if c.vmBackend == "qemu" {
-                check(fm.isExecutableFile(atPath: "/opt/homebrew/opt/qemu/bin/qemu-system-aarch64"), "QEMU installed",
-                      "Run: brew install qemu")
+                let qemuPath = "/opt/homebrew/opt/qemu/bin/qemu-system-aarch64"
+                let qemuThere = fm.isExecutableFile(atPath: qemuPath)
+                var qemuRuns = false
+                if qemuThere {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: qemuPath)
+                    p.arguments = ["--version"]
+                    p.standardOutput = FileHandle.nullDevice
+                    p.standardError = FileHandle.nullDevice
+                    if (try? p.run()) != nil { p.waitUntilExit(); qemuRuns = p.terminationStatus == 0 }
+                }
+                check(qemuRuns, qemuThere ? "QEMU installed but won't run" : "QEMU installed",
+                      qemuThere ? "Run: brew reinstall qemu (a cleanup likely removed a library it needs)" : "Run: brew install qemu")
             } else {
                 check(fm.fileExists(atPath: "/Applications/UTM.app"), "UTM installed",
                       "Install UTM from https://mac.getutm.app — or choose \"Set Up Windows VM…\" to build a WinDinghy VM that needs no UTM.")
@@ -1176,9 +1287,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
             check(appMgmtOK, "App Management permission (lets WinDinghy update app launchers)",
                   "Turn on WinDinghy in System Settings > Privacy & Security > App Management.")
 
+            if c.vmBackend == "qemu" {
+                let loginOn = SMAppService.mainApp.status == .enabled
+                let auto = ConfigFile.bool("vmAutoStart", true)
+                if auto && !loginOn {
+                    check(false, "Windows starts with WinDinghy, but WinDinghy doesn't start at login",
+                          "Either turn on \"Start WinDinghy at login\" (General), or accept that Windows only starts once you open WinDinghy.")
+                }
+                let how = ConfigFile.string("vmOnQuit", "save"), idle = ConfigFile.string("vmIdleAction", "off")
+                if how == "save" || idle == "save" {
+                    let need = Double(ConfigFile.int("vmRamGB", 6) + ConfigFile.int("vmMinFreeGB", 2))
+                    var dir = URL(fileURLWithPath: c.vmDir)
+                    while !fm.fileExists(atPath: dir.path) && dir.path != "/" { dir.deleteLastPathComponent() }
+                    let free = (try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+                    let freeGB = Double(free ?? Int64.max) / 1_073_741_824
+                    check(freeGB >= need, String(format: "Enough free space to save Windows's state (%.0f GB free, %.0f GB needed)", min(freeGB, 9999), need),
+                          "Free up space or move the VM. Until then Windows is shut down normally on quit instead of saved.")
+                }
+            }
             let launcherCount = ((try? fm.contentsOfDirectory(atPath: c.appsDir)) ?? []).filter { $0.hasSuffix(".app") }.count
             check(launcherCount > 0, "\(launcherCount) app launchers synced",
                   "Run Sync Apps Now from this menu (VM must be online).")
+
+            // Launchers that pin a node/dinghy path that no longer exists silently open Windows App.
+            let staleLaunchers = ((try? fm.contentsOfDirectory(atPath: c.appsDir)) ?? []).filter { $0.hasSuffix(".app") }.filter { name in
+                guard let t = try? String(contentsOfFile: c.appsDir + "/" + name + "/Contents/MacOS/launcher", encoding: .utf8),
+                      let re = try? NSRegularExpression(pattern: "\\[ -x \"([^\"]+)\" \\] && \\[ -f \"([^\"]+)\"|\\[ -n \"\\$NODE\" \\] && \\[ -f \"([^\"]+)\""),
+                      let m = re.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)) else { return false }
+                for i in 1..<m.numberOfRanges {
+                    if let r = Range(m.range(at: i), in: t), !fm.fileExists(atPath: String(t[r])) { return true }
+                }
+                return false
+            }
+            check(staleLaunchers.isEmpty, staleLaunchers.isEmpty ? "App launchers can find node and dinghy" : "\(staleLaunchers.count) launchers point at a missing node/dinghy (they'd open Windows App)",
+                  "Run Sync Apps Now from this menu.")
 
             DispatchQueue.main.async {
                 let alert = NSAlert()
@@ -1254,3 +1396,66 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()
+
+
+/// A menu row for one Windows app. Menus ignore right-clicks on plain rows, so this draws its own row
+/// (matching the system look) and handles the mouse itself.
+final class AppRowView: NSView {
+    let name: String
+    let icon: NSImage
+    var blocker: String?          // why Run as Administrator isn't available, if it isn't
+    var onOpen: (() -> Void)?
+    var onAdmin: (() -> Void)?
+    private var hover = false
+
+    init(name: String, icon: NSImage) {
+        self.name = name; self.icon = icon
+        super.init(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+        autoresizingMask = [.width]
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseEntered(with e: NSEvent) { hover = true; needsDisplay = true }
+    override func mouseExited(with e: NSEvent) { hover = false; needsDisplay = true }
+
+    override func draw(_ dirty: NSRect) {
+        let lit = hover || (enclosingMenuItem?.isHighlighted ?? false)
+        if lit {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 1), xRadius: 4, yRadius: 4).fill()
+        }
+        icon.draw(in: NSRect(x: 14, y: 3, width: 16, height: 16))
+        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
+        (name as NSString).draw(in: NSRect(x: 38, y: 3, width: bounds.width - 50, height: 16), withAttributes: [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: lit ? NSColor.selectedMenuItemTextColor : NSColor.labelColor,
+            .paragraphStyle: para,
+        ])
+    }
+
+    override func mouseUp(with e: NSEvent) {
+        if e.modifierFlags.contains(.control) { showChoices(); return }
+        enclosingMenuItem?.menu?.cancelTracking()
+        if e.modifierFlags.contains(.option) { onAdmin?() } else { onOpen?() }
+    }
+    override func rightMouseUp(with e: NSEvent) { showChoices() }
+
+    private func showChoices() {
+        enclosingMenuItem?.menu?.cancelTracking()
+        let m = NSMenu()
+        let open = NSMenuItem(title: "Open", action: #selector(chooseOpen), keyEquivalent: "")
+        let admin = NSMenuItem(title: "Run as Administrator", action: blocker == nil ? #selector(chooseAdmin) : nil, keyEquivalent: "")
+        admin.toolTip = blocker
+        for i in [open, admin] { i.target = self }
+        m.addItem(open); m.addItem(admin)
+        if let why = blocker {
+            let note = NSMenuItem(title: why, action: nil, keyEquivalent: ""); note.isEnabled = false
+            m.addItem(note)
+        }
+        // After the main menu has closed
+        DispatchQueue.main.async { m.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil) }
+    }
+    @objc private func chooseOpen() { onOpen?() }
+    @objc private func chooseAdmin() { onAdmin?() }
+}

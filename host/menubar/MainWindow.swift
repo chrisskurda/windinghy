@@ -187,6 +187,8 @@ struct AppCell: View {
         .onTapGesture { store.launch(app) }
         .contextMenu {
             Button("Open") { store.launch(app) }
+            Button("Run as Administrator") { store.launchAsAdmin(app) }
+                .disabled(store.adminBlocker(app) != nil)
             if isRunning { Button("Quit") { store.quit(app) } }
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: app.path)]) }
         }
@@ -287,6 +289,7 @@ struct ResourcesView: View {
             } footer: {
                 Text("Resource changes apply the next time the Windows machine starts.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
+            if store.cfg.vmBackend == "qemu" { PowerSection() }
             Section {
                 DisclosureGroup("Advanced") {
                     let c = store.cfg
@@ -301,6 +304,93 @@ struct ResourcesView: View {
         .formStyle(.grouped)
         .frame(maxWidth: 620)
         .frame(maxWidth: .infinity)
+    }
+}
+
+struct PowerSection: View {
+    @EnvironmentObject var store: AppStore
+    @StateObject private var autoStartBox = Box(true)
+    @StateObject private var delayBox = Box(30)
+    @StateObject private var onQuitBox = Box("save")
+    @StateObject private var idleActionBox = Box("off")
+    @StateObject private var idleMinutesBox = Box(15)
+    @StateObject private var minFreeBox = Box(2)
+    @StateObject private var loginOnBox = Box(false)
+    @StateObject private var freeGBBox = Box<Double?>(nil)
+
+    private var ramGB: Int { ConfigFile.int("vmRamGB", 6) }
+    private var needGB: Int { ramGB + minFreeBox.value }
+    private var spaceShort: Bool { (freeGBBox.value ?? 9999) < Double(needGB) }
+    private var savesState: Bool { onQuitBox.value == "save" || idleActionBox.value == "save" }
+
+    var body: some View {
+        Section {
+            Toggle("Start Windows when WinDinghy opens", isOn: Binding(get: { autoStartBox.value }, set: { autoStartBox.value = $0; ConfigFile.setBool("vmAutoStart", $0) }))
+            if autoStartBox.value {
+                Picker("Delay after login", selection: Binding(get: { delayBox.value }, set: { delayBox.value = $0; ConfigFile.set("vmStartDelaySec", $0) })) {
+                    Text("None").tag(0); Text("15 seconds").tag(15); Text("30 seconds").tag(30)
+                    Text("1 minute").tag(60); Text("2 minutes").tag(120); Text("5 minutes").tag(300)
+                }
+            }
+            if autoStartBox.value && !loginOnBox.value {
+                note("WinDinghy isn't set to start at login (General), so Windows only starts once you open WinDinghy yourself.", warn: true)
+            } else if !autoStartBox.value && loginOnBox.value {
+                note("WinDinghy starts at login, but Windows will only start when you open an app.", warn: false)
+            } else if autoStartBox.value && delayBox.value > 0 {
+                note("The delayBox.value applies when WinDinghy opens at login, so logging in stays quick. Opening it yourself starts Windows right away.", warn: false)
+            }
+            Picker("When WinDinghy quits", selection: Binding(get: { onQuitBox.value }, set: { onQuitBox.value = $0; ConfigFile.set("vmOnQuit", $0) })) {
+                Text("Save Windows and stop it").tag("save")
+                Text("Shut Windows down").tag("shutdown")
+                Text("Leave Windows running").tag("keep")
+            }
+            Picker("When no Windows apps are open", selection: Binding(get: { idleActionBox.value }, set: { idleActionBox.value = $0; ConfigFile.set("vmIdleAction", $0) })) {
+                Text("Do nothing").tag("off")
+                Text("Pause Windows (saves power, wakes instantly)").tag("pause")
+                Text("Save Windows and stop it").tag("save")
+                Text("Shut Windows down").tag("shutdown")
+            }
+            if idleActionBox.value != "off" {
+                Picker("After", selection: Binding(get: { idleMinutesBox.value }, set: { idleMinutesBox.value = $0; ConfigFile.set("vmIdleMinutes", $0) })) {
+                    ForEach([5, 10, 15, 30, 60, 120], id: \.self) { Text($0 < 60 ? "\($0) minutes" : "\($0 / 60) hour\($0 == 60 ? "" : "s")").tag($0) }
+                }
+            }
+            if savesState {
+                Stepper(value: Binding(get: { minFreeBox.value }, set: { minFreeBox.value = $0; ConfigFile.set("vmMinFreeGB", $0) }), in: 0...100) {
+                    HStack { Text("Keep free after saving"); Spacer(); Text("\(minFreeBox.value) GB").foregroundStyle(.secondary) }
+                }
+                if spaceShort {
+                    note(String(format: "Only %.0f GB is free on the VM's disk; a saved state needs %d GB (%d GB of memory + %d GB kept free). Until there's room, Windows is shut down normally instead of saved. Free up space, or move the VM in Storage.", freeGBBox.value ?? 0, needGB, ramGB, minFreeBox.value), warn: true)
+                } else {
+                    note("A saved state is about as large as Windows's memory (\(ramGB) GB) and is deleted as soon as Windows starts again. Needs \(needGB) GB free; \(Int(freeGBBox.value ?? 0)) GB is.", warn: false)
+                }
+            }
+            if idleActionBox.value == "pause" {
+                note("Paused Windows keeps its memory but uses no processor time. Background work inside Windows (downloads, updates) stops until you open an app.", warn: false)
+            }
+        } header: { Text("Power") } footer: {
+            Text("Windows's own sleep and hibernate aren't offered: they're unreliable on this virtual machine. Pause and save do the same job from outside.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+        .onAppear(perform: load)
+    }
+
+    @ViewBuilder private func note(_ text: String, warn: Bool) -> some View {
+        Label(text, systemImage: warn ? "exclamationmark.triangle.fill" : "info.circle")
+            .font(.system(size: 12)).foregroundStyle(warn ? Color.orange : Color.secondary)
+    }
+
+    private func load() {
+        autoStartBox.value = ConfigFile.bool("vmAutoStart", true)
+        delayBox.value = ConfigFile.int("vmStartDelaySec", 30)
+        onQuitBox.value = ConfigFile.string("vmOnQuit", "save")
+        idleActionBox.value = ConfigFile.string("vmIdleAction", "off")
+        idleMinutesBox.value = ConfigFile.int("vmIdleMinutes", 15)
+        minFreeBox.value = ConfigFile.int("vmMinFreeGB", 2)
+        loginOnBox.value = SMAppService.mainApp.status == .enabled
+        var dir = URL(fileURLWithPath: store.cfg.vmDir)
+        while !FileManager.default.fileExists(atPath: dir.path) && dir.path != "/" { dir.deleteLastPathComponent() }
+        if let b = (try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage { freeGBBox.value = Double(b) / 1_073_741_824 }
     }
 }
 
@@ -497,6 +587,10 @@ struct GeneralView: View {
             }
             Section("Startup & appearance") {
                 Toggle("Start WinDinghy at login", isOn: Binding(get: { login.value }, set: { setLogin($0) }))
+                if login.value && store.cfg.vmBackend == "qemu" && ConfigFile.bool("vmAutoStart", true) {
+                    Text("Windows also starts with WinDinghy, after a short delay (see Power in Resources).")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
                 Picker("Menu bar icon", selection: Binding(get: { store.menubarIcon }, set: { store.menubarIcon = $0; store.delegate?.setMenubarIcon($0) })) {
                     Text("WinDinghy dinghy").tag("boat")
                     Text("Window symbol").tag("symbol")

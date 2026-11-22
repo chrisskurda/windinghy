@@ -27,6 +27,18 @@
 - **Menu-bar icon:** the new dinghy glyph (a template image) is the default; the original window symbol
   stays available (menu bar > Menu Bar Icon).
 
+## Far out: more than one VM, Linux and Android
+
+Managing several VMs (advanced mode) belongs with supporting other guests, Linux and Android, so it is a
+long way off and should be designed together with them. Today the code assumes one VM: fixed forwarded
+ports (13389 / 17148), a single VM folder and name, and one set of launchers. It would need:
+
+- a VM list with per-VM folder, ports, resources, power settings, snapshots and saved state;
+- a per-VM launcher folder (or a VM badge on launchers) and a VM picker in the menu bar and window;
+- a guest abstraction beyond Windows/RemoteApp (Linux apps over Wayland/RDP, Android via its own display
+  protocol), and a decision on whether one RDP client per VM still makes sense;
+- the "one long-lived client per VM" Unity-style design above, generalised to several VMs.
+
 ## Next (tuning the native client)
 - Per-app Dock icons/names (bundle-local client copy; verify on macOS).
 - Show connection errors as native notifications instead of FreeRDP's unscaled dialogs (done).

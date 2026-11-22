@@ -313,6 +313,35 @@ final class AppStore: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: app.path))
     }
 
+    /// Why this app can't run as administrator, or nil if it can. Store (UWP) apps can't be elevated.
+    func adminBlocker(_ app: WinApp) -> String? { adminBlocker(forAppAt: app.path) }
+
+    func adminBlocker(forAppAt path: String) -> String? {
+        guard let d = FileManager.default.contents(atPath: path + "/Contents/Resources/app.json"),
+              let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return nil }
+        if j["desktop"] as? Bool == true { return "Windows Desktop is already a full session." }
+        if (j["Source"] as? String) == "uwp" || ((j["Args"] as? String) ?? "").localizedCaseInsensitiveContains("shell:AppsFolder") {
+            return "Microsoft Store apps can't run as administrator (a Windows limit)."
+        }
+        return nil
+    }
+
+    /// Opens the app elevated. dinghy sets it up in Windows and reports problems itself (notification).
+    func launchAsAdmin(_ app: WinApp) { launchAsAdmin(appAt: app.path) }
+
+    func launchAsAdmin(appAt path: String) {
+        if let why = adminBlocker(forAppAt: path) { delegate?.notify(why); return }
+        guard let node = findNode(), let dinghy = findDinghy() else { delegate?.notify("Can't find node or dinghy.mjs."); return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [dinghy, "open-rdp", path + "/Contents/Resources", "--admin"]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        p.environment = env
+        try? p.run()   // stays alive as long as the app's connection does
+    }
+
     func quit(_ app: WinApp) {
         NSWorkspace.shared.runningApplications
             .filter { $0.bundleURL?.path == app.path }

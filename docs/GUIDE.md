@@ -17,6 +17,8 @@ macOS asks for **App Management** permission so WinDinghy can update its app lau
 - **Windows Desktop** opens the whole Windows desktop. Use it for anything that isn't a single app. It can be made full screen.
 - After installing something inside Windows, press **Sync Apps Now** (or `dinghy sync`).
 
+Right-click an app (in the window, or in the menu-bar list) and choose **Run as Administrator** for apps that need it, such as Registry Editor or installers. In the menu bar you can also hold ⌥ and click. There is no UAC prompt: it needs your Windows account to be an administrator (the one WinDinghy creates is). Microsoft Store apps can't be elevated.
+
 ## Installing software
 
 **Software** searches the winget catalog and installs for all users. It works without a Microsoft account. Installed software can be updated or removed there. The Microsoft Store also works from the Windows Desktop if you sign in.
@@ -51,6 +53,12 @@ In **Storage & Backup > Reset & uninstall**:
 ## Resources
 
 Cores, memory and disk size apply the next time the VM starts. The disk can grow, not shrink.
+
+## Power
+
+Resources > Power controls the Windows VM's lifecycle. By default Windows starts when WinDinghy opens (after a 30-second delay if WinDinghy opened at login, so logging in stays quick) and is **saved** when WinDinghy quits, so the next start resumes exactly where you were. You can instead shut it down or leave it running, and optionally pause, save or shut it down after some idle minutes. Pause freezes Windows (no CPU, memory kept) and wakes when you open an app.
+
+A saved state is about as big as the VM's memory, so it needs that much free space plus a margin (default 2 GB, `vmMinFreeGB`). If there isn't room, WinDinghy tells you and shuts Windows down normally instead. Windows's own sleep/hibernate aren't offered: they're unreliable on this virtual machine.
 
 ## When something is wrong
 

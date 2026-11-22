@@ -10,6 +10,9 @@ bumps may include breaking changes).
 
 ### Added
 
+- Run as Administrator: right-click an app in the window, right-click (or hold ⌥ and click) an app in the menu bar, or `dinghy launch "<app>" --admin`. Windows can't show its UAC prompt through RemoteApp, so the app is started elevated by a one-shot scheduled task running as your (administrator) account; the task deletes itself when the app exits. Store apps can't be elevated, and a non-administrator account gets a clear message.
+- VM power settings (Resources > Power; `dinghy config`): start Windows when WinDinghy opens (`vmAutoStart`, with a login delay `vmStartDelaySec`, default 30 s, applied only when WinDinghy opens at login); on quit, save the running machine, shut it down, or leave it (`vmOnQuit`, default save); after N idle minutes pause, save or shut down (`vmIdleAction`, default off). Saved states are single-use, discarded if the disk, QEMU or the VM's size changed, and need RAM + `vmMinFreeGB` (default 2 GB) free: otherwise WinDinghy says so and shuts down normally. CLI: `dinghy vm autostart|save|pause|resume|quit|idle`; `dinghy vm status` shows paused/saved state and free space. Settings call out "start at login" mismatches. Setup Check and `dinghy doctor` verify free space.
+- Snapshots check the same free-space floor first.
 - Windows sign-in controls (Account & Activation): see the current account, show or copy its password, change it or generate a new one, switch to another account or create one. CLI: `dinghy password show|set|random`, `dinghy user list|use <name> [--create] [--admin]`.
 - The setup window asks for a Windows password (blank generates one); the account's full name is your macOS name (`--fullname`).
 
@@ -18,6 +21,8 @@ bumps may include breaking changes).
 - Reset & uninstall (Storage & Backup): rewind to the clean install, reinstall Windows (optional safety export first, same account and resources), or remove Windows from this Mac. CLI: `dinghy vm reinstall --yes [--backup <path>]`, `dinghy uninstall [--yes] [--purge-cache] [--purge-settings]`.
 
 ### Fixed
+
+- The managed VM no longer starts QEMU with `-daemonize` (saving state from the forked process crashed QEMU). A VM started by an older version shuts down normally once, then saves work.
 
 - Windows Desktop (and the VM's own screen) no longer sign in as the built-in Administrator after a fresh install. Setup used to restart the VM as soon as the guest agent answered, cutting off the first-logon script before it retired the Administrator account and its auto-logon. Setup now waits for that script to finish, then disables the Administrator; `dinghy fix admin` repairs an existing VM.
 - Opening WinDinghy with no Windows installed now opens the window (the setup wizard) instead of only adding a menu-bar icon.

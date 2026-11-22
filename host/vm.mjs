@@ -21,6 +21,7 @@ const QGA = path.join(HERE, "qga.mjs");
 export const VM_NAME = "WinDinghy";
 export const RDP_PORT = 13389;
 export const API_PORT = 17148;
+const PORT_OFFSET = Number(process.env.DINGHY_VM_PORT_OFFSET || 0);   // tests only: run a second VM beside the real one
 
 export function vmDir(cfg) {
     return cfg.vmDir || path.join(os.homedir(), "Library", "Application Support", "WinDinghy", "vm");
@@ -38,6 +39,11 @@ export function files(cfg) {
         pid: path.join(d, "qemu.pid"),
         log: path.join(d, "qemu.log"),
         shot: path.join(d, "last.png"),
+        state: path.join(d, "saved-state.mig"),
+        stateMeta: path.join(d, "saved-state.json"),
+        saveOk: path.join(d, "qemu.save-ok"),
+        pausedMark: path.join(d, "qemu.paused"),   // for the menu-bar app: the VM is frozen, not off
+        err: path.join(d, "qemu-err.log"),
     };
 }
 
@@ -56,8 +62,12 @@ export function tools() {
     const q = brewPrefix("qemu");
     const have = q && fs.existsSync(path.join(q, "bin", "qemu-system-aarch64"));
     const share = have ? path.join(q, "share", "qemu") : null;
+    // A cleanup can remove a library qemu links against and leave the binary behind, so run it.
+    const runs = !!have && spawnSync(path.join(q, "bin", "qemu-system-aarch64"), ["--version"], { timeout: 10000 }).status === 0;
     return {
-        ok: !!have && fs.existsSync(path.join(share, "edk2-aarch64-code.fd")),
+        installed: !!have,
+        runs,
+        ok: runs && fs.existsSync(path.join(share, "edk2-aarch64-code.fd")),
         qemu: have ? path.join(q, "bin", "qemu-system-aarch64") : null,
         img: have ? path.join(q, "bin", "qemu-img") : null,
         code: share ? path.join(share, "edk2-aarch64-code.fd") : null,
@@ -133,7 +143,7 @@ export function qemuArgs(cfg, media = {}, { ramMB = (cfg.vmRamGB || 6) * 1024, c
         "-device", "usb-tablet",
         "-drive", `file=${f.disk},if=none,id=sys,format=qcow2,discard=unmap`,
         "-device", "nvme,drive=sys,serial=windinghy,bootindex=0",
-        "-netdev", `user,id=net0,hostfwd=tcp:127.0.0.1:${RDP_PORT}-:3389,hostfwd=tcp:127.0.0.1:${API_PORT}-:7148`,
+        "-netdev", `user,id=net0,hostfwd=tcp:127.0.0.1:${RDP_PORT + PORT_OFFSET}-:3389,hostfwd=tcp:127.0.0.1:${API_PORT + PORT_OFFSET}-:7148`,
         "-device", "virtio-net-pci,netdev=net0",
         "-device", "virtio-serial-pci",
         "-chardev", `socket,path=${f.qga},server=on,wait=off,id=qga0`,
@@ -142,7 +152,6 @@ export function qemuArgs(cfg, media = {}, { ramMB = (cfg.vmRamGB || 6) * 1024, c
         "-display", process.env.DINGHY_VM_DISPLAY === "cocoa" ? "cocoa" : "none",
         "-serial", `file:${f.log}`,
         "-pidfile", f.pid,
-        "-daemonize",
     ];
     // The Windows ISO is ~5 GB and Setup reads all of it, so it must be on a fast device: emulated
     // USB storage manages only ~1.4 MB/s, while a virtio-scsi CD-ROM is fast (Setup loads its
@@ -179,16 +188,49 @@ export function growDiskIfNeeded(cfg) {
 export function needsExtend(cfg) { return fs.existsSync(path.join(files(cfg).dir, "needs-extend")); }
 export function clearNeedsExtend(cfg) { fs.rmSync(path.join(files(cfg).dir, "needs-extend"), { force: true }); }
 
+// QEMU must NOT use -daemonize: it forks after the hypervisor is set up, and saving the machine state
+// from that forked process crashes QEMU (Hypervisor.framework's GIC encoder isn't fork-safe). So it is
+// started in the background from a shell instead; the marker records that this process is save-capable.
+function launch(cfg, args) {
+    const f = files(cfg);
+    const t = tools();
+    fs.rmSync(f.saveOk, { force: true });
+    fs.rmSync(f.pausedMark, { force: true });
+    fs.rmSync(f.pid, { force: true });
+    fs.rmSync(f.err, { force: true });
+    spawnSync("/bin/sh", ["-c", '"$@" >/dev/null 2>"$QERR" </dev/null &', "sh", t.qemu, ...args], { env: { ...process.env, QERR: f.err } });
+    const end = Date.now() + 30000;
+    while (Date.now() < end) {
+        if (fs.existsSync(f.qmp) && pidOf(cfg)) {
+            fs.writeFileSync(f.saveOk, String(pidOf(cfg)));
+            return;
+        }
+        // pid file but no longer alive = QEMU exited early
+        if (fs.existsSync(f.pid) && !pidOf(cfg)) break;
+        spawnSync("sleep", ["0.2"]);
+    }
+    let why = ""; try { why = fs.readFileSync(f.err, "utf8").trim().slice(0, 400); } catch {}
+    throw new Error(`QEMU failed to start: ${why || "it exited right away"}`);
+}
+
+// True when this QEMU process was started by launch() (so saving its state is safe).
+export function canSaveState(cfg) {
+    try { return Number(fs.readFileSync(files(cfg).saveOk, "utf8")) === pidOf(cfg); } catch { return false; }
+}
+
 export function start(cfg, media = {}, opts = {}) {
     const f = files(cfg);
     const t = tools();
-    if (!t.ok) throw new Error("QEMU isn't installed. Run: brew install qemu");
+    if (!t.ok) throw new Error(t.installed ? "QEMU is installed but won't run. Try: brew reinstall qemu" : "QEMU isn't installed. Run: brew install qemu");
     if (!exists(cfg)) throw new Error("There's no WinDinghy VM yet. Create it with: dinghy vm create");
-    if (isRunning(cfg)) return true;
+    if (isRunning(cfg)) { if (isPaused(cfg)) resume(cfg); return true; }
     if (!media.windows) growDiskIfNeeded(cfg);   // not during an install
     for (const s of [f.qmp, f.qga]) fs.rmSync(s, { force: true });
-    const r = spawnSync(t.qemu, qemuArgs(cfg, media, opts), { encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`QEMU failed to start: ${(r.stderr || r.stdout || "").trim().slice(0, 400)}`);
+    const resumeFrom = media.windows ? null : usableState(cfg);
+    const args = qemuArgs(cfg, media, opts);
+    if (resumeFrom) args.push("-incoming", `file:${f.state}`);
+    launch(cfg, args);
+    if (resumeFrom) finishRestore(cfg);
     return true;
 }
 
@@ -197,6 +239,8 @@ export function start(cfg, media = {}, opts = {}) {
 export function stop(cfg, waitSec = 60) {
     const pid = pidOf(cfg);
     if (!pid) return true;
+    if (isPaused(cfg)) resume(cfg);   // a frozen guest can't act on a shutdown request
+    fs.rmSync(files(cfg).pausedMark, { force: true });
     const asked = spawnSync(process.execPath, [QGA, files(cfg).qga, "shutdown"], { timeout: 15000 }).status === 0;
     if (!asked) qmp(cfg, "system_powerdown");
     const end = Date.now() + waitSec * 1000;
@@ -208,6 +252,133 @@ export function stop(cfg, waitSec = 60) {
     spawnSync("sleep", ["1"]);
     if (pidOf(cfg)) { try { process.kill(pid, "SIGKILL"); } catch {} }
     return !pidOf(cfg);
+}
+
+// ---------- power: pause, save state, free-space guard ----------
+// Pause freezes the vCPUs (the VM costs ~no CPU, RAM stays). Save state writes the whole machine
+// (RAM + devices) to disk and quits, so the next start picks up exactly where Windows was. The state
+// is only valid for the disk it was taken against, so it is single-use: restoring it deletes it.
+
+const GB = 1024 ** 3;
+
+export function freeBytes(dir) {
+    let d = dir;
+    while (d && !fs.existsSync(d)) d = path.dirname(d);
+    try { const s = fs.statfsSync(d); return s.bavail * s.bsize; } catch { return null; }
+}
+
+// Bytes that must be free before a save state (RAM size + the margin kept free afterwards) or a snapshot (margin).
+export function minFreeBytes(cfg, forState = true) {
+    const margin = (Number.isFinite(Number(cfg.vmMinFreeGB)) ? Number(cfg.vmMinFreeGB) : 2) * GB;
+    return margin + (forState ? (cfg.vmRamGB || 6) * GB : 0);
+}
+
+export function spaceCheck(cfg, forState = true) {
+    const free = freeBytes(vmDir(cfg));
+    const need = minFreeBytes(cfg, forState);
+    const g = b => (b / GB).toFixed(1);
+    if (free === null || free >= need) return { ok: true, free, need };
+    return {
+        ok: false, free, need,
+        message: `Not enough free space for a ${forState ? "saved state" : "snapshot"} on the VM's disk: ${g(free)} GB free, ${g(need)} GB needed` +
+            `${forState ? ` (${cfg.vmRamGB || 6} GB of RAM + ${Number(cfg.vmMinFreeGB ?? 2)} GB kept free)` : ""}. Free some space, move the VM (dinghy vm move <folder>), or lower "vmMinFreeGB".`,
+    };
+}
+
+function vmStatus(cfg) { const r = qmp(cfg, "query-status"); return r ? r.status : null; }
+export function isPaused(cfg) { return isRunning(cfg) && vmStatus(cfg) === "paused"; }
+export function pause(cfg) {
+    if (!isRunning(cfg)) return false;
+    if (!isPaused(cfg) && !qmp(cfg, "stop")) return false;
+    try { fs.writeFileSync(files(cfg).pausedMark, String(Date.now())); } catch {}
+    return true;
+}
+export function resume(cfg) {
+    if (!isRunning(cfg)) return false;
+    if (isPaused(cfg) && !qmp(cfg, "cont")) return false;
+    fs.rmSync(files(cfg).pausedMark, { force: true });
+    return true;
+}
+
+// What a saved state is only good for: the same QEMU, the same machine shape, the same disk contents.
+function stateFingerprint(cfg) {
+    const t = tools();
+    const ver = (spawnSync(t.qemu, ["--version"], { encoding: "utf8" }).stdout || "").split("\n")[0];
+    let disk = 0; try { disk = fs.statSync(files(cfg).disk).mtimeMs; } catch {}
+    return JSON.stringify({ ver, ram: cfg.vmRamGB || 6, cpus: cfg.vmCpus || 4, disk });
+}
+
+export function discardState(cfg) {
+    const f = files(cfg);
+    for (const p of [f.state, f.state + ".part", f.stateMeta, f.pausedMark, f.saveOk, f.err]) fs.rmSync(p, { force: true });
+}
+
+export function hasState(cfg) { return fs.existsSync(files(cfg).state) && fs.existsSync(files(cfg).stateMeta); }
+
+// The saved state if it can still be used; otherwise it is deleted and null comes back (a cold boot follows).
+function usableState(cfg) {
+    if (!hasState(cfg)) { discardState(cfg); return null; }
+    const f = files(cfg);
+    let meta = null; try { meta = JSON.parse(fs.readFileSync(f.stateMeta, "utf8")); } catch {}
+    if (!meta || meta.fingerprint !== stateFingerprint(cfg)) { discardState(cfg); return null; }
+    return meta;
+}
+
+// After -incoming: wait for the state to load, drop it (the disk is about to diverge), then run.
+function finishRestore(cfg) {
+    const f = files(cfg);
+    const end = Date.now() + 120000;
+    let loaded = false;
+    while (Date.now() < end) {
+        const st = vmStatus(cfg);
+        if (st && st !== "inmigrate") { loaded = true; break; }
+        if (!isRunning(cfg)) break;
+        spawnSync("sleep", ["0.5"]);
+    }
+    if (!loaded || vmStatus(cfg) === "internal-error") {
+        // Couldn't restore: throw the half-started machine away and boot Windows from scratch.
+        try { qmp(cfg, "quit"); } catch {}
+        spawnSync("sleep", ["1"]);
+        const pid = pidOf(cfg); if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+        discardState(cfg);
+        for (const s of [f.qmp, f.qga]) fs.rmSync(s, { force: true });
+        launch(cfg, qemuArgs(cfg));
+        return false;
+    }
+    discardState(cfg);
+    qmp(cfg, "cont");
+    return true;
+}
+
+// Save the running machine and quit. Throws (leaving the VM running) when it can't, so callers can fall back to stop().
+export function saveState(cfg, waitSec = 240) {
+    if (!isRunning(cfg)) throw new Error("The VM isn't running.");
+    if (!canSaveState(cfg)) throw new Error("This VM was started by an older WinDinghy and can't be saved safely; it will shut down normally this time.");
+    const sp = spaceCheck(cfg, true);
+    if (!sp.ok) throw new Error(sp.message);
+    const f = files(cfg);
+    const part = f.state + ".part";
+    discardState(cfg);
+    const bail = msg => { fs.rmSync(part, { force: true }); qmp(cfg, "cont"); throw new Error(msg); };
+    if (!qmp(cfg, "stop")) bail("Couldn't pause the VM to save it.");
+    if (!qmp(cfg, "migrate", { uri: `file:${part}` })) bail("QEMU refused to save the machine state.");
+    const end = Date.now() + waitSec * 1000;
+    let st = null;
+    while (Date.now() < end) {
+        st = qmp(cfg, "query-migrate");
+        if (!isRunning(cfg)) throw new Error("QEMU stopped while saving; the saved state was discarded.");
+        if (st && (st.status === "completed" || st.status === "failed")) break;
+        spawnSync("sleep", ["1"]);
+    }
+    if (!st || st.status !== "completed") bail(`Saving the machine state ${st?.status === "failed" ? "failed" : "timed out"}${st?.["error-desc"] ? `: ${st["error-desc"]}` : ""}.`);
+    fs.renameSync(part, f.state);
+    qmp(cfg, "quit");
+    for (let i = 0; i < 20 && pidOf(cfg); i++) spawnSync("sleep", ["0.5"]);
+    const pid = pidOf(cfg); if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    // Fingerprint after QEMU has quit: closing the disk updates it.
+    fs.rmSync(f.pausedMark, { force: true });
+    fs.writeFileSync(f.stateMeta, JSON.stringify({ savedAt: Date.now(), fingerprint: stateFingerprint(cfg), bytes: fs.statSync(f.state).size }));
+    return true;
 }
 
 // ---------- snapshots (qcow2 internal snapshots; the VM must be stopped) ----------
@@ -234,6 +405,8 @@ function needStopped(cfg) {
 export function snapshotCreate(cfg, name) {
     if (!validSnapshotName(name)) throw new Error("Snapshot names may use letters, digits, '.', '_' and '-' (up to 40 characters).");
     needStopped(cfg);
+    const sp = spaceCheck(cfg, false);
+    if (!sp.ok) throw new Error(sp.message);
     const f = files(cfg);
     if (snapshotList(cfg).some(x => x.name === name)) throw new Error(`A snapshot named "${name}" already exists.`);
     const r = spawnSync(tools().img, ["snapshot", "-c", name, f.disk], { encoding: "utf8" });
@@ -249,6 +422,7 @@ export function snapshotApply(cfg, name) {
     const r = spawnSync(tools().img, ["snapshot", "-a", name, f.disk], { encoding: "utf8" });
     if (r.status !== 0) throw new Error(`Couldn't rewind: ${(r.stderr || r.stdout).trim()}`);
     if (fs.existsSync(snapVars(cfg, name))) fs.copyFileSync(snapVars(cfg, name), f.vars);
+    discardState(cfg);   // a saved state belongs to the disk as it was before the rewind
 }
 
 export function snapshotDelete(cfg, name) {
@@ -275,7 +449,7 @@ export function createDisk(cfg, gb) {
 export function destroy(cfg) {
     stop(cfg, 20);
     const f = files(cfg);
-    for (const p of [f.disk, f.vars, f.unattend, f.qmp, f.qga, f.pid, f.log, f.shot, f.disk + ".part"]) {
+    for (const p of [f.disk, f.vars, f.unattend, f.qmp, f.qga, f.pid, f.log, f.shot, f.disk + ".part", f.state, f.state + ".part", f.stateMeta, f.pausedMark, f.saveOk, f.err]) {
         try { fs.unlinkSync(p); } catch {}
     }
     try { fs.rmSync(path.join(f.dir, "snapshots"), { recursive: true, force: true }); } catch {}
@@ -285,7 +459,7 @@ export function destroy(cfg) {
 export function sizeOnDisk(cfg) {
     const f = files(cfg);
     let total = 0;
-    for (const p of [f.disk, f.vars, f.unattend]) { try { total += fs.statSync(p).size; } catch {} }
+    for (const p of [f.disk, f.vars, f.unattend, f.state]) { try { total += fs.statSync(p).size; } catch {} }
     try { for (const n of fs.readdirSync(path.join(f.dir, "snapshots"))) total += fs.statSync(path.join(f.dir, "snapshots", n)).size; } catch {}
     return total;
 }
