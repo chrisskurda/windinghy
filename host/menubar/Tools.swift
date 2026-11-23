@@ -633,3 +633,97 @@ struct AboutSection: View {
         }
     }
 }
+
+// MARK: - USB sharing (managed VM)
+
+struct UsbDevice: Identifiable, Hashable {
+    let id: String            // "vvvv:pppp"
+    let name: String
+    let vendor: String
+    let storage: Bool
+    let hid: Bool
+    var shared: Bool          // remembered: re-shared whenever Windows starts and it's plugged in
+    var attached: Bool        // in Windows right now
+    var absent: Bool          // remembered but not plugged in
+}
+
+final class UsbStore: ObservableObject {
+    static let shared = UsbStore()
+    private var cli: AppDelegate? { AppStore.shared.delegate }
+    @Published var devices: [UsbDevice] = []
+    @Published var running = false
+    @Published var busy: String? = nil       // id being switched
+    @Published var message: String? = nil
+
+    func refresh() {
+        cli?.runDinghyCapture(["usb", "list", "--json"]) { [weak self] status, text in
+            guard let self, status == 0,
+                  let line = text.split(separator: "\n").reversed().first(where: { $0.hasPrefix("{") }),
+                  let data = String(line).data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            self.running = (o["running"] as? Bool) ?? false
+            self.devices = ((o["devices"] as? [[String: Any]]) ?? []).map {
+                UsbDevice(id: $0["id"] as? String ?? "", name: $0["name"] as? String ?? "USB device",
+                          vendor: $0["vendor"] as? String ?? "", storage: $0["storage"] as? Bool ?? false,
+                          hid: $0["hid"] as? Bool ?? false, shared: $0["shared"] as? Bool ?? false,
+                          attached: $0["attached"] as? Bool ?? false, absent: $0["absent"] as? Bool ?? false)
+            }
+        }
+    }
+
+    func set(_ d: UsbDevice, share: Bool) {
+        busy = d.id; message = nil
+        cli?.runDinghyCapture(["usb", share ? "share" : "unshare", d.id]) { [weak self] status, text in
+            guard let self else { return }
+            self.busy = nil
+            if status != 0 {
+                // the CLI prints its error as the last line ("dinghy: ...")
+                let why = text.split(separator: "\n").last.map(String.init) ?? "Windows may not be running."
+                self.message = "Couldn't share \(d.name): " + why
+            }
+            self.refresh()
+        }
+    }
+}
+
+struct UsbSection: View {
+    @ObservedObject private var usb = UsbStore.shared
+    private let tick = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Section {
+            if usb.devices.isEmpty {
+                Text("No USB devices found. Plug one in and it shows up here.").foregroundStyle(.secondary)
+            }
+            ForEach(usb.devices) { d in
+                Toggle(isOn: Binding(get: { d.shared }, set: { usb.set(d, share: $0) })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(d.name)
+                        Text(detail(d)).font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(usb.busy != nil || d.absent && !d.shared)
+            }
+            if let m = usb.message {
+                Label(m, systemImage: "exclamationmark.triangle.fill").font(.system(size: 12)).foregroundStyle(Color.orange)
+            }
+        } header: { Text("USB devices") } footer: {
+            Text("A shared device disappears from the Mac and appears in Windows, and comes back to the Mac when you turn it off. It stays shared whenever it's plugged in and Windows starts. Drives are ejected from the Mac first. Keyboards, mice and other input devices stay with the Mac.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+        .toggleStyle(.switch)
+        .onAppear { usb.refresh() }
+        .onReceive(tick) { _ in if usb.busy == nil { usb.refresh() } }
+    }
+
+    private func detail(_ d: UsbDevice) -> String {
+        var parts: [String] = []
+        if d.absent { parts.append("Not plugged in") }
+        else if d.attached { parts.append("In Windows now") }
+        else if d.shared { parts.append(usb.running ? "Couldn't be shared: unplug and replug it, or turn it off and on" : "Shared when Windows starts") }
+        else if d.storage { parts.append("Drive") }
+        if !d.vendor.isEmpty && !d.absent { parts.append(d.vendor) }
+        parts.append(d.id)
+        return parts.joined(separator: " · ")
+    }
+}

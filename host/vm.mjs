@@ -96,6 +96,13 @@ export function qmp(cfg, execute, args = {}) {
     try { return JSON.parse(r.stdout || "{}"); } catch { return {}; }
 }
 
+// Like qmp(), but says why it failed: { ok, value } or { ok: false, error }.
+export function qmpTry(cfg, execute, args = {}) {
+    const r = spawnSync(process.execPath, [QGA, files(cfg).qmp, "qmp", execute, JSON.stringify(args)], { encoding: "utf8", timeout: 20000 });
+    if (r.status !== 0) return { ok: false, error: (r.stderr || "").trim() || "QEMU didn't answer" };
+    try { return { ok: true, value: JSON.parse(r.stdout || "{}") }; } catch { return { ok: true, value: {} }; }
+}
+
 export function sendKeys(cfg, qcodes) {
     return qmp(cfg, "send-key", { keys: qcodes.map(k => ({ type: "qcode", data: k })) });
 }
@@ -121,6 +128,108 @@ export function screenshot(cfg, file = files(cfg).shot) {
     return fs.existsSync(file) ? file : null;
 }
 
+
+// ---------- USB sharing ----------
+// Host USB devices are handed to the guest with QEMU's usb-host (libusb), hot-plugged over QMP onto the
+// xhci controller's spare ports. A device is identified by "vvvv:pppp" (hex vendor:product). Plugging in
+// two identical devices shares the first one libusb finds.
+// - macOS keeps a device's own driver attached: a USB drive's volumes must be unmounted first (done here),
+//   and keyboards/mice/other HID devices owned by the system usually can't be claimed at all.
+// - usb-host can't be saved with the machine, so saveState detaches everything first; callers re-attach
+//   the remembered devices (cfg.usbShared) with usbSync once the VM is back.
+
+const usbId = (v, p) => `${v.toString(16).padStart(4, "0")}:${p.toString(16).padStart(4, "0")}`;
+const usbDevId = id => `wd-usb-${id.replace(":", "-")}`;
+export function validUsbId(id) { return /^[0-9a-f]{4}:[0-9a-f]{4}$/i.test(String(id ?? "")); }
+
+// Devices plugged into the Mac that make sense to share: hubs and Apple's own built-in hardware are left out.
+export function usbDevices() {
+    const r = spawnSync("ioreg", ["-r", "-c", "IOUSBHostDevice", "-l", "-w0"], { encoding: "utf8", timeout: 15000, maxBuffer: 64 * 1024 * 1024 });
+    if (r.status !== 0) return [];
+    const out = [];
+    for (const block of (r.stdout || "").split(/^(?=\+-o )/m)) {
+        if (!block.startsWith("+-o ")) continue;
+        const num = k => { const m = block.match(new RegExp(`"${k}" = (\\d+)`)); return m ? Number(m[1]) : null; };
+        const str = k => { const m = block.match(new RegExp(`"${k}" = "([^"]*)"`)); return m ? m[1].trim() : ""; };
+        const vid = num("idVendor"), pid = num("idProduct");
+        if (vid === null || pid === null) continue;
+        const cls = num("bDeviceClass");
+        const name = str("USB Product Name") || str("kUSBProductString") || block.match(/^\+-o\s+(.+?)@/)?.[1]?.trim() || "USB device";
+        if (cls === 9) continue;                                          // hubs
+        if (vid === 0x05ac && !/iphone|ipad|ipod/i.test(name)) continue;   // Apple built-ins (keyboard, trackpad, Bluetooth, camera)
+        // Whole-disk BSD names under this device (disk4, not disk4s1): these are its drives.
+        const disks = [...new Set([...block.matchAll(/"BSD Name" = "(disk\d+)"/g)].map(m => m[1]))];
+        out.push({
+            id: usbId(vid, pid), name,
+            vendor: str("USB Vendor Name") || str("kUSBVendorString"),
+            serial: str("USB Serial Number") || str("kUSBSerialNumberString"),
+            storage: disks.length > 0, disks,
+            // libusb can't open a device macOS has bound a driver to; HID (keyboards, mice) is the usual case
+            hid: cls === 3,
+        });
+    }
+    // The same vendor:product twice is one entry (see note above).
+    return out.filter((d, i) => out.findIndex(x => x.id === d.id) === i).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Ids of the devices currently attached to the running VM.
+export function usbAttached(cfg) {
+    if (!isRunning(cfg)) return [];
+    const r = qmpTry(cfg, "qom-list", { path: "/machine/peripheral" });
+    if (!r.ok || !Array.isArray(r.value)) return [];
+    return r.value.map(x => /^wd-usb-([0-9a-f]{4})-([0-9a-f]{4})$/.exec(x.name)).filter(Boolean).map(m => `${m[1]}:${m[2]}`);
+}
+
+export function usbAttach(cfg, id) {
+    if (!validUsbId(id)) throw new Error(`"${id}" isn't a USB id (expected vvvv:pppp, e.g. 0781:5583).`);
+    id = id.toLowerCase();
+    if (!isRunning(cfg)) throw new Error("Windows isn't running.");
+    if (usbAttached(cfg).includes(id)) return true;
+    const dev = usbDevices().find(d => d.id === id);
+    if (!dev) throw new Error("That device isn't plugged into this Mac.");
+    // A drive macOS has mounted belongs to macOS until it's unmounted (data isn't lost: it just goes away from the Finder).
+    for (const d of dev.disks) spawnSync("diskutil", ["unmountDisk", d], { encoding: "utf8", timeout: 30000 });
+    const [v, p] = id.split(":");
+    const r = qmpTry(cfg, "device_add", { driver: "usb-host", id: usbDevId(id), vendorid: parseInt(v, 16), productid: parseInt(p, 16) });
+    if (!r.ok) {
+        const why = r.error;
+        if (/No free .*port|no free/i.test(why)) throw new Error("All of Windows's USB ports are in use: stop sharing another device first.");
+        if (/permission|access|busy|claim|libusb|open/i.test(why))
+            throw new Error(`macOS won't let WinDinghy take ${dev.name}${dev.hid ? " (keyboards, mice and other input devices stay with the Mac)" : dev.storage ? " (eject it in the Finder first if it still shows up there)" : ""}. (${why})`);
+        throw new Error(`Couldn't share ${dev.name}: ${why}`);
+    }
+    return true;
+}
+
+export function usbDetach(cfg, id) {
+    if (!validUsbId(id)) throw new Error(`"${id}" isn't a USB id (expected vvvv:pppp).`);
+    id = id.toLowerCase();
+    if (!usbAttached(cfg).includes(id)) return true;
+    const r = qmpTry(cfg, "device_del", { id: usbDevId(id) });
+    if (!r.ok) throw new Error(`Couldn't release the device: ${r.error}`);
+    return true;
+}
+
+export function usbDetachAll(cfg) {
+    const had = usbAttached(cfg);
+    for (const id of had) { try { usbDetach(cfg, id); } catch {} }
+    if (had.length) spawnSync("sleep", ["1"]);   // device_del completes when the guest lets go
+    return had;
+}
+
+// Attach each remembered device that is plugged in now. Returns { attached, missing, failed }.
+export function usbSync(cfg, ids = cfg.usbShared) {
+    const res = { attached: [], missing: [], failed: [] };
+    if (!isRunning(cfg) || !Array.isArray(ids)) return res;
+    const here = new Set(usbDevices().map(d => d.id));
+    for (const id of ids) {
+        if (!validUsbId(id)) continue;
+        if (!here.has(id.toLowerCase())) { res.missing.push(id); continue; }
+        try { usbAttach(cfg, id); res.attached.push(id); } catch (e) { res.failed.push({ id, error: e.message }); }
+    }
+    return res;
+}
+
 // ---------- the QEMU command line ----------
 
 // media: { windows, unattend, virtio } -> install-time CD-ROMs (all optional at runtime)
@@ -138,7 +247,7 @@ export function qemuArgs(cfg, media = {}, { ramMB = (cfg.vmRamGB || 6) * 1024, c
         "-drive", `if=pflash,format=raw,unit=0,readonly=on,file=${t.code}`,
         "-drive", `if=pflash,format=raw,unit=1,file=${f.vars}`,
         "-device", "ramfb",
-        "-device", "qemu-xhci",
+        "-device", "qemu-xhci,p2=8,p3=8",   // spare ports for USB sharing (usb-host hot-plug); see usbAttach
         "-device", "usb-kbd",
         "-device", "usb-tablet",
         "-drive", `file=${f.disk},if=none,id=sys,format=qcow2,discard=unmap`,
@@ -305,7 +414,7 @@ function stateFingerprint(cfg) {
     const t = tools();
     const ver = (spawnSync(t.qemu, ["--version"], { encoding: "utf8" }).stdout || "").split("\n")[0];
     let disk = 0; try { disk = fs.statSync(files(cfg).disk).mtimeMs; } catch {}
-    return JSON.stringify({ ver, ram: cfg.vmRamGB || 6, cpus: cfg.vmCpus || 4, disk });
+    return JSON.stringify({ ver, ram: cfg.vmRamGB || 6, cpus: cfg.vmCpus || 4, disk, usb: 2 });
 }
 
 export function discardState(cfg) {
@@ -359,7 +468,9 @@ export function saveState(cfg, waitSec = 240) {
     const f = files(cfg);
     const part = f.state + ".part";
     discardState(cfg);
-    const bail = msg => { fs.rmSync(part, { force: true }); qmp(cfg, "cont"); throw new Error(msg); };
+    // usb-host can't be saved with the machine: let go of shared devices first (they're re-attached on the next start).
+    const usbHad = usbDetachAll(cfg);
+    const bail = msg => { fs.rmSync(part, { force: true }); qmp(cfg, "cont"); for (const id of usbHad) { try { usbAttach(cfg, id); } catch {} } throw new Error(msg); };
     if (!qmp(cfg, "stop")) bail("Couldn't pause the VM to save it.");
     if (!qmp(cfg, "migrate", { uri: `file:${part}` })) bail("QEMU refused to save the machine state.");
     const end = Date.now() + waitSec * 1000;

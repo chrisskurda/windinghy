@@ -74,6 +74,7 @@ const DEFAULTS = {
     vmIdleAction: "off",    // after vmIdleMinutes with no Windows apps open: off | pause (freeze, ~0 CPU) | save | shutdown
     vmIdleMinutes: 15,
     vmMinFreeGB: 2,         // free space to keep on the VM's disk; a saved state needs this plus the VM's RAM size
+    usbShared: [],          // USB devices ("vvvv:pppp") shared with Windows; re-attached whenever the VM starts and they're plugged in
     nativeDebug: "off",  // on: log RAIL window/focus traffic to ~/.config/windinghy/logs/<app>.log
     appsDir: path.join(os.homedir(), "Applications", "WinDinghy"),
 };
@@ -136,6 +137,7 @@ function sanitizeConfig(cfg) {
     if (cfg.profiles === undefined) cfg.profiles = {};   // absent is normal (nothing saved yet)
     fix(!cfg.profiles || typeof cfg.profiles !== "object" || Array.isArray(cfg.profiles), "saved backend profiles were corrupt -> reset", () => { cfg.profiles = {}; });
     fix(!Array.isArray(cfg.readOnlyShares) || cfg.readOnlyShares.some(x => typeof x !== "string"), "read-only share list was corrupt -> cleared", () => { cfg.readOnlyShares = []; });
+    fix(!Array.isArray(cfg.usbShared) || cfg.usbShared.some(x => !VM.validUsbId(x)), "USB sharing list was corrupt -> cleared", () => { cfg.usbShared = []; });
     fix(typeof cfg.username !== "string", "username wasn't text -> cleared", () => { cfg.username = ""; });
     // Banner files from older VMs: drop any that are unreadable or hold no real text.
     for (const f of ["banner.json", "banner-qemu.json"]) {
@@ -1719,6 +1721,15 @@ async function vmAutoStart(cfg, atLogin) {
     VM.start(cfg);
     if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("Windows started but the guest server didn't answer in 5 minutes.");
     say("Online.");
+    usbReattach(cfg);
+}
+
+// Re-attach the USB devices shared with Windows (they were released when the VM last stopped or saved).
+function usbReattach(cfg) {
+    if (!Array.isArray(cfg.usbShared) || !cfg.usbShared.length) return;
+    const r = VM.usbSync(cfg);
+    if (r.attached.length) say(`Shared USB: ${r.attached.join(", ")}`);
+    for (const f of r.failed) say(`WARN: couldn't share USB ${f.id}: ${f.error}`);
 }
 
 // quit / idle / save / pause. "save" falls back to a normal shutdown, with the reason, when it can't be done.
@@ -1744,6 +1755,51 @@ function vmApplyPower(cfg, action, why) {
     say(VM.stop(cfg, 90) ? "Windows is shut down." : "WARN: Windows didn't shut down in time and was stopped.");
 }
 
+// dinghy usb [list [--json]] | share <vvvv:pppp> | unshare <vvvv:pppp> | sync
+// Sharing is remembered (config usbShared): the device comes back whenever Windows starts and it's plugged in.
+async function cmdUsb(cfg, args) {
+    if (!isQemu(cfg)) throw new Error("USB sharing is for the WinDinghy-managed VM (dinghy vm create).");
+    const sub = args[0] ?? "list";
+    const remembered = () => (Array.isArray(cfg.usbShared) ? cfg.usbShared : []).map(x => x.toLowerCase());
+    switch (sub) {
+        case "list": {
+            const up = VM.isRunning(cfg), att = new Set(VM.usbAttached(cfg)), mem = new Set(remembered());
+            const devs = VM.usbDevices().map(d => ({ ...d, shared: mem.has(d.id), attached: att.has(d.id) }));
+            // Remembered devices that aren't plugged in stay listed, so they can be forgotten.
+            for (const id of mem) if (!devs.some(d => d.id === id)) devs.push({ id, name: "(not plugged in)", vendor: "", serial: "", storage: false, disks: [], hid: false, shared: true, attached: false, absent: true });
+            if (args.includes("--json")) { console.log(JSON.stringify({ running: up, devices: devs })); return; }
+            if (!devs.length) { say("No USB devices found."); return; }
+            for (const d of devs) say(`${d.id}  ${d.name.padEnd(32)} ${d.attached ? "shared with Windows" : d.shared ? "will share when plugged in" : ""}`);
+            return;
+        }
+        case "share": {
+            const id = String(args[1] ?? "").toLowerCase();
+            if (!VM.validUsbId(id)) throw new Error("Usage: dinghy usb share <vvvv:pppp>   (see: dinghy usb list)");
+            // Attach first: a device that can't be shared isn't remembered.
+            const running = VM.isRunning(cfg);
+            if (running) VM.usbAttach(cfg, id);
+            if (!remembered().includes(id)) { cfg.usbShared = [...remembered(), id]; saveConfig(cfg); }
+            say(running ? "Shared with Windows." : "Remembered. It's shared when Windows starts.");
+            return;
+        }
+        case "unshare": {
+            const id = String(args[1] ?? "").toLowerCase();
+            if (!VM.validUsbId(id)) throw new Error("Usage: dinghy usb unshare <vvvv:pppp>");
+            cfg.usbShared = remembered().filter(x => x !== id); saveConfig(cfg);
+            if (VM.isRunning(cfg)) VM.usbDetach(cfg, id);
+            say("Released to the Mac.");
+            return;
+        }
+        case "sync": {
+            const r = VM.usbSync(cfg);
+            say(`attached: ${r.attached.join(", ") || "none"}`);
+            for (const f of r.failed) say(`WARN: ${f.id}: ${f.error}`);
+            return;
+        }
+        default: throw new Error("Usage: dinghy usb [list [--json] | share <id> | unshare <id> | sync]");
+    }
+}
+
 async function cmdVm(cfg, args) {
     const sub = args[0] ?? "status";
     switch (sub) {
@@ -1759,6 +1815,7 @@ async function cmdVm(cfg, args) {
             if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("The VM started but the guest server didn't answer in 5 minutes.");
             await extendWindowsPartition(cfg);
             say("Online.");
+            usbReattach(cfg);
             return;
         }
         case "stop": say(VM.stop(cfg) ? "Stopped." : "Couldn't stop the VM."); return;
@@ -2453,6 +2510,7 @@ try {
         }
         case "setup":       await cmdSetup(cfg, rest); break;
         case "vm":          await cmdVm(cfg, rest); break;
+        case "usb":         await cmdUsb(cfg, rest); break;
         case "uninstall":   await cmdUninstall(cfg, rest); break;
         case "password":    await cmdPassword(cfg, rest); break;
         case "user":        await cmdUser(cfg, rest); break;
@@ -2472,6 +2530,7 @@ Usage:
   dinghy launch "<name>"      launch a Windows app
   dinghy desktop              full Windows desktop session
   dinghy doctor               check mac-side + guest-side requirements
+  dinghy usb [list|share|unshare]  share Mac USB devices with the managed Windows VM
   dinghy config [key [val]]   show/set config (host, apiPort, rdpPort, username, appsDir)
   dinghy update               pull the latest WinDinghy from git and rebuild
   dinghy password <show|set|random>   the Windows account password (saved in your Keychain)

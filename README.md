@@ -36,6 +36,7 @@ The tested Windows version is **Windows 11 24H2 (build 26100) ARM64**. Other ver
 ## Sharing between Mac and Windows
 
 - Your **home folder** is shared by default (`\\tsclient\Home`).
+- **USB devices** can be handed to Windows in Sharing (drives, dongles, hardware with Windows-only software). Keyboards, mice and other input devices stay with the Mac.
 - **Documents, Downloads, Desktop, Pictures, Music and Videos** in Windows are your Mac's folders by default. Switch any of them off in Sharing.
 - Any share can be marked **Read-only**: Windows can look but not change. Enforced in the RDP client.
 - Clipboard, audio and printers are shared and can be turned off.
@@ -66,7 +67,6 @@ By default WinDinghy only supports its own managed VM. **Advanced mode** (Genera
 ## Not possible yet
 
 - **Windows Desktop inside the main window.** It opens in its own window. Embedding needs an in-process RDP view.
-- **USB sharing.** Planned, using QEMU's USB passthrough.
 - **3D acceleration.** Windows on QEMU/HVF has no GPU driver, so graphics are software-rendered.
 
 ## Layout

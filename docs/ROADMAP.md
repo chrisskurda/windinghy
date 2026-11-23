@@ -123,7 +123,6 @@ A general RDP connection manager built on the same patched FreeRDP:
 ## Not yet possible (decided 2026-11)
 
 - **Windows Desktop embedded in the main window** needs an in-process RDP view (libfreerdp plus AppKit rendering). Today it opens in its own full-screen-capable window. The same work enables one-connection Dock identity and a Start widget.
-- **USB sharing** needs the URBDRC channel built against libusb plus a device picker.
 - **Read-only shared folders**: done (FreeRDP drive-channel patch).
-- **USB sharing**: planned on the QEMU side (usb-host with QMP hot-plug and a device picker); no FreeRDP work needed for the managed VM.
+- **USB sharing**: done on the QEMU side (usb-host hot-plugged over QMP, picker in Sharing). Limits: macOS keeps devices it has a driver for (keyboards, mice), identical devices share one vendor:product id, and it needs the managed VM.
 - **3D acceleration**: none for Windows guests on QEMU/HVF today (no ARM64 WDDM virtio-gpu driver); software rendering only.

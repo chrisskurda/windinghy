@@ -458,6 +458,7 @@ struct SharingView: View {
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             .toggleStyle(.switch)
+            if store.cfg.vmBackend == "qemu" { UsbSection() }
             Section("Shared folders") {
                 if store.folders.isEmpty {
                     Text("No extra folders shared.").foregroundStyle(.secondary)
