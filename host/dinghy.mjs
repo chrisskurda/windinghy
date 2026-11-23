@@ -326,6 +326,10 @@ function writeAppBundle(cfg, dirName, displayName, rdpContent, iconBase64, tmpDi
     let iconEntry = "";
     if (iconBase64 && makeIcns(iconBase64, path.join(resources, "app.icns"), tmpDir)) {
         iconEntry = "    <key>CFBundleIconFile</key>\n    <string>app</string>\n";
+    } else if (appMeta?.desktop) {
+        // The full desktop has no guest icon of its own: use the bundled four-pane window.
+        const own = [path.join(__dirname, "desktop.icns"), path.join(__dirname, "icons", "desktop.icns")].find(f => fs.existsSync(f));
+        if (own) { fs.copyFileSync(own, path.join(resources, "app.icns")); iconEntry = "    <key>CFBundleIconFile</key>\n    <string>app</string>\n"; }
     }
 
     const bundleId = "app.windinghy." + dirName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -864,6 +868,7 @@ async function launchNative(cfg, meta, bundleDir, retried = false) {
     const pw = getPassword(cfg, retried);
     if (!pw) { notify("No Windows password saved. Run: dinghy login"); process.exit(1); }
 
+    autoApplyFolders(cfg);   // the registry write the Sharing > Windows folders defaults depend on
     const launchedAt = Date.now();
     // Windows keeps one live connection per user, so a newer launch replaces this one. Record our
     // start time; if a later launch has started by the time we exit, we were superseded (silently).
@@ -926,6 +931,9 @@ function diagnoseExit(cfg, code, log, elapsedSec = 0) {
         return { title: "Windows rejected the login", message: `Windows rejected the password for ${winUser(cfg)}. Run "dinghy fix login" to reset it, or "dinghy login" to enter the right one.` };
     if (/ERRCONNECT_ACCESS_DENIED|0x00020016|authorization result/.test(errs))
         return { title: "Not allowed to use Remote Desktop", message: `${winUser(cfg)} signed in but isn't allowed to log on over Remote Desktop. Run: dinghy fix login` };
+    // Windows restarting or shutting down under a live session ends it with an error code FreeRDP has no name
+    // for (ERRINFO_UNKNOWN 0x1A). Seen when restarting the VM: after a long-lived session that is a normal end.
+    if (/ERRINFO_UNKNOWN \[?0x0*1001a\]?|ERRINFO_UNKNOWN 0x0*1a\b/i.test(errs) && elapsedSec > 45) return null;
     if (/ERRINFO_(LOGOFF_BY_USER|RPC_INITIATED_DISCONNECT)\b/.test(errs)) {
         // The user signing out of Windows (or an app quitting) a while after connecting is a normal end.
         if (elapsedSec > 45) return null;
@@ -1722,6 +1730,7 @@ async function vmAutoStart(cfg, atLogin) {
     if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("Windows started but the guest server didn't answer in 5 minutes.");
     say("Online.");
     usbReattach(cfg);
+    autoApplyFolders(cfg, { force: true });
 }
 
 // Re-attach the USB devices shared with Windows (they were released when the VM last stopped or saved).
@@ -1816,6 +1825,7 @@ async function cmdVm(cfg, args) {
             await extendWindowsPartition(cfg);
             say("Online.");
             usbReattach(cfg);
+            autoApplyFolders(cfg, { force: true });
             return;
         }
         case "stop": say(VM.stop(cfg) ? "Stopped." : "Couldn't stop the VM."); return;
@@ -2118,16 +2128,50 @@ async function cmdFolders(cfg, args) {
         return;
     }
     if (sub !== "apply") throw new Error("Usage: dinghy folders <status|on|off|ro|apply> [--json]");
-    // Write each folder's location into the Windows user's registry. A new session picks it up, so the
-    // user's Windows session is signed out afterwards (open Windows apps close).
+    const r = applyFolders(cfg, { auto: false });
+    say(r.applied ? (r.changed ? "Folder locations updated. Open a Windows app to see them." : "Folder locations were already right.") : `Couldn't update the folders:\n${r.output.trim()}`);
+}
+
+// The desired state: { regName: value } for every known folder ("on" = the Mac's folder, "off" = Windows' own).
+function foldersWanted(cfg) {
+    const w = {};
+    for (const f of KNOWN_FOLDERS) for (const name of f.reg) w[name] = redirectOn(cfg, f) ? `\\\\tsclient\\${f.share}` : `%USERPROFILE%\\${f.local}`;
+    return w;
+}
+
+// Enforced from three sides so nothing quietly undoes it:
+//  1. the user's User Shell Folders values are written (and compared first: only real drift is "changed");
+//  2. a policy file in ProgramData plus a logon task that re-asserts it at every Windows sign-in, whatever
+//     reset the values (profile repair, Windows update, a stray Settings > Storage change);
+//  3. dinghy re-checks before each app launch and after Windows starts (autoApplyFolders).
+// A manual apply also signs the user out so the new locations take effect now; the automatic one doesn't
+// (an open session keeps its old folders until it ends).
+function applyFolders(cfg, { auto }) {
     const vm = needAgent(cfg);
     const user = winUser(cfg).split("\\").pop();
-    const lines = KNOWN_FOLDERS.flatMap(f => f.reg.map(name => {
-        const value = redirectOn(cfg, f) ? `\\\\tsclient\\${f.share}` : `%USERPROFILE%\\${f.local}`;
-        return `Set-ItemProperty -Path $k -Name '${name}' -Value '${psq(value)}' -Type ExpandString`;
-    }));
+    const wanted = foldersWanted(cfg);
+    const json = JSON.stringify(wanted).replace(/'/g, "''");
+    // Runs as the signing-in user (task) and re-asserts the policy file into HKCU.
+    const logonScript = [
+        "$ErrorActionPreference='SilentlyContinue'",
+        "$w = Get-Content 'C:\\ProgramData\\WinDinghy\\folders.json' -Raw | ConvertFrom-Json",
+        "$k = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders'",
+        "foreach ($p in $w.PSObject.Properties) { $cur = (Get-Item $k).GetValue($p.Name, '', 'DoNotExpandEnvironmentNames'); if ($cur -ne $p.Value) { Set-ItemProperty -Path $k -Name $p.Name -Value $p.Value -Type ExpandString } }",
+    ].join("\n").replace(/'/g, "''");
     const r = G.ps(vm, `
 $u = '${psq(user)}'
+$dir = 'C:\\ProgramData\\WinDinghy'
+New-Item -ItemType Directory -Force $dir | Out-Null
+$wanted = '${json}' | ConvertFrom-Json
+Set-Content -Path "$dir\\folders.json" -Value '${json}' -Encoding UTF8
+Set-Content -Path "$dir\\folders.ps1" -Value '${logonScript}' -Encoding UTF8
+if (-not (Get-ScheduledTask -TaskName 'WinDinghy Folders' -ErrorAction SilentlyContinue)) {
+    $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $dir\\folders.ps1"
+    $trg = New-ScheduledTaskTrigger -AtLogOn
+    $pri = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+    Register-ScheduledTask -TaskName 'WinDinghy Folders' -Action $act -Trigger $trg -Principal $pri -Force | Out-Null
+}
+$id = (quser 2>$null | Select-String -Pattern "$u\\s+\\S*\\s+(\\d+)" | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1)
 $sid = (Get-LocalUser -Name $u).SID.Value
 $root = "Registry::HKEY_USERS\\$sid"
 $loaded = $false
@@ -2136,13 +2180,28 @@ if (-not (Test-Path $root)) {
     $root = "Registry::HKEY_USERS\\dinghy_tmp"; $loaded = $true
 }
 $k = "$root\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
-${lines.join("\n")}
+$changed = 0
+foreach ($p in $wanted.PSObject.Properties) {
+    $cur = (Get-Item $k).GetValue($p.Name, '', 'DoNotExpandEnvironmentNames')
+    if ($cur -ne $p.Value) { Set-ItemProperty -Path $k -Name $p.Name -Value $p.Value -Type ExpandString; $changed++ }
+}
 if ($loaded) { [gc]::Collect(); Start-Sleep 1; reg unload "HKU\\dinghy_tmp" | Out-Null }
-# sign the user out so the next app launch starts a session with the new folder locations
-$id = (quser 2>$null | Select-String -Pattern "$u\\s+\\S*\\s+(\\d+)" | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1)
-if ($id) { logoff $id }
-"applied"`, { timeout: 120000 });
-    say(/applied/.test(r.output) ? "Folder locations updated. Open a Windows app to see them." : `Couldn't update the folders:\n${r.output.trim()}`);
+${auto ? "" : "if ($id -and $changed) { logoff $id }"}
+"applied changed=$changed"`, { timeout: 120000 });
+    const m = /applied changed=(\d+)/.exec(r.output);
+    return { applied: !!m, changed: m ? Number(m[1]) : 0, output: r.output };
+}
+
+// Re-assert the folder settings (cheap and idempotent), at most every 5 minutes. Failures never block a launch.
+const foldersStamp = () => path.join(CONFIG_DIR, "folders-checked");
+function autoApplyFolders(cfg, { force = false } = {}) {
+    try {
+        if (!cfg.username || !isQemu(cfg)) return;
+        if (!force) { try { if (Date.now() - fs.statSync(foldersStamp()).mtimeMs < 300000) return; } catch {} }
+        const r = applyFolders(cfg, { auto: true });
+        if (r.applied) { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(foldersStamp(), String(Date.now())); }
+        if (r.changed) console.error(`Windows folder settings had drifted; re-applied (${r.changed}).`);
+    } catch {}
 }
 
 // ---------- open a Windows Settings page ----------

@@ -8,6 +8,11 @@ bumps may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows folder redirection (Documents, Downloads, ...) defaulted to on but was never written to Windows unless you toggled it and pressed Apply. It is now applied automatically and kept enforced: dinghy compares the real registry values before each app launch and after Windows starts, and a "WinDinghy Folders" logon task in Windows re-asserts a policy file (`C:\ProgramData\WinDinghy\folders.json`) at every sign-in.
+- A Windows restart under a long-lived session no longer shows a "Connection failed" dialog.
+
 ### Added
 
 - USB sharing (Sharing > USB devices; `dinghy usb list|share|unshare`): hand a USB device from the Mac to Windows and back while it runs. Sharing is remembered and re-applied when Windows starts and the device is plugged in. Drives are ejected from the Mac first; devices are released before the machine state is saved (QEMU can't save them). The VM gets 8 USB ports, so a saved state from an earlier version is discarded once.

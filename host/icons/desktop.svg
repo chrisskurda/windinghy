@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f9bff"/>
+      <stop offset="1" stop-color="#0a4fc2"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#bg)"/>
+  <!-- a window of four panes: the Windows desktop -->
+  <g fill="#fff">
+    <rect x="272" y="272" width="228" height="228" rx="20"/>
+    <rect x="524" y="272" width="228" height="228" rx="20"/>
+    <rect x="272" y="524" width="228" height="228" rx="20"/>
+    <rect x="524" y="524" width="228" height="228" rx="20"/>
+  </g>
+</svg>
