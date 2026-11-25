@@ -622,6 +622,7 @@ async function ensureGuest(cfg, interactive) {
     if (isQemu(cfg) && VM.isRunning(cfg) && VM.isPaused(cfg)) {
         if (interactive) console.log("Waking the paused Windows VM...");
         VM.resume(cfg);
+        syncClockAfterResume(cfg).catch(() => {});
     }
     if (await guestAlive(cfg)) return true;
 
@@ -1717,7 +1718,7 @@ async function cmdUninstall(cfg, args) {
 // (a booting Windows VM would otherwise compete with everything else logging in).
 async function vmAutoStart(cfg, atLogin) {
     if (!isQemu(cfg) || cfg.vmAutoStart !== "on" || !VM.exists(cfg)) return;
-    if (VM.isRunning(cfg)) { if (VM.isPaused(cfg)) { VM.resume(cfg); say("Resumed."); } return; }
+    if (VM.isRunning(cfg)) { if (VM.isPaused(cfg)) { VM.resume(cfg); say("Resumed."); await syncClockAfterResume(cfg); } return; }
     if (atLogin && cfg.vmStartDelaySec > 0) {
         say(`Waiting ${cfg.vmStartDelaySec}s before starting Windows (login delay)...`);
         await new Promise(r => setTimeout(r, cfg.vmStartDelaySec * 1000));
@@ -1729,6 +1730,7 @@ async function vmAutoStart(cfg, atLogin) {
     VM.start(cfg);
     if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("Windows started but the guest server didn't answer in 5 minutes.");
     say("Online.");
+    await syncClockAfterResume(cfg);
     usbReattach(cfg);
     autoApplyFolders(cfg, { force: true });
 }
@@ -1824,6 +1826,7 @@ async function cmdVm(cfg, args) {
             if (!await waitFor(() => guestApiUp(cfg), 300, 4000)) throw new Error("The VM started but the guest server didn't answer in 5 minutes.");
             await extendWindowsPartition(cfg);
             say("Online.");
+            await syncClockAfterResume(cfg);
             usbReattach(cfg);
             autoApplyFolders(cfg, { force: true });
             return;
@@ -1836,7 +1839,10 @@ async function cmdVm(cfg, args) {
         case "pause": return vmApplyPower(cfg, "pause", "pause");
         case "resume": {
             if (!VM.isRunning(cfg)) throw new Error("The VM isn't running. Start it with: dinghy vm start");
-            say(VM.resume(cfg) ? "Resumed." : "Couldn't resume the VM."); return;
+            const ok = VM.resume(cfg);
+            say(ok ? "Resumed." : "Couldn't resume the VM.");
+            if (ok) await syncClockAfterResume(cfg);
+            return;
         }
         case "status": {
             const f = VM.files(cfg);
@@ -2383,12 +2389,29 @@ function setGuestClock(vmName) {
     return /clock set/.test(r.output);
 }
 
+// Saving or pausing the VM freezes Windows' clock, so after a restore/resume it is simply stale.
+// That's expected, not a fault: set it from the Mac and only complain if that doesn't work.
+async function syncClockAfterResume(cfg) {
+    if (!isQemu(cfg)) return true;
+    const end = Date.now() + 60_000;
+    let skew = 0;
+    while (Date.now() < end) {
+        skew = await guestClockSkew(cfg);
+        if (skew <= 60) return true;
+        try { if (G.agentUp(cfg.vmName) && setGuestClock(cfg.vmName) && await guestClockSkew(cfg) <= 60) return true; } catch {}
+        await new Promise(r => setTimeout(r, 4000));
+    }
+    const msg = `Couldn't sync the Windows clock (still off by ${Math.round(skew)}s). The connection may fail with a security error (0x1807). Run "dinghy fix clock" or restart the VM.`;
+    say(`WARN: ${msg}`);
+    notify(msg);
+    return false;
+}
+
 // Used at launch: returns true if the clock is (or was just made) right.
 async function ensureGuestClock(cfg) {
     let skew = await guestClockSkew(cfg);
     if (skew <= 60) return true;
     if (G.utmInstalled() && cfg.vmName && G.agentUp(cfg.vmName)) {
-        notify(`Windows clock is off by ${Math.round(skew)}s: setting it from your Mac…`);
         if (setGuestClock(cfg.vmName)) return (await guestClockSkew(cfg)) <= 60;
     }
     return false;
