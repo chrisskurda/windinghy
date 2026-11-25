@@ -1,5 +1,5 @@
 {
-  "windinghy": "0.2.0",
+  "windinghy": "0.3.0",
   "windows": {
     "tested": [
       { "build": 26100, "name": "Windows 11 24H2 (ARM64)", "validated": "2026-11-20", "note": "Full install, apps, snapshots, folders, winget. Validated at 26100.4349." }

@@ -4,7 +4,7 @@ Each WinDinghy release is validated against one set of components. The machine-r
 
 | Component | Tested | Notes |
 |---|---|---|
-| WinDinghy | 0.2.0 | |
+| WinDinghy | 0.3.0 | |
 | Windows | **11 24H2, build 26100, ARM64** (validated at 26100.4349) | Retail ISO from Microsoft. Pro edition. 25H2 shares this servicing branch but has not been validated. |
 | WinBoat guest agent | based on **v0.9.0** (`0.9.0-mac`) | Latest upstream seen: v0.9.2 (2026-11-20). Not merged automatically. |
 | FreeRDP | 3.33.2-dev0, commit `6fd1571` | Patched SDL3 client. Includes a read-only share patch. |

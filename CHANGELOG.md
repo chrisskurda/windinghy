@@ -8,28 +8,30 @@ bumps may include breaking changes).
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.0] - 2026-11-25
 
-- Windows folder redirection (Documents, Downloads, ...) defaulted to on but was never written to Windows unless you toggled it and pressed Apply. It is now applied automatically and kept enforced: dinghy compares the real registry values before each app launch and after Windows starts, and a "WinDinghy Folders" logon task in Windows re-asserts a policy file (`C:\ProgramData\WinDinghy\folders.json`) at every sign-in.
-- A Windows restart under a long-lived session no longer shows a "Connection failed" dialog.
+The everyday-use release: USB sharing, Run as Administrator, VM power settings (save, pause, auto-start), account controls, reset & uninstall, and enforced folder redirection.
+
+Tested set unchanged from 0.2.0 (see [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)). A saved VM state from 0.2.0 is discarded once on first start (the VM gets more USB ports).
 
 ### Added
 
-- USB sharing (Sharing > USB devices; `dinghy usb list|share|unshare`): hand a USB device from the Mac to Windows and back while it runs. Sharing is remembered and re-applied when Windows starts and the device is plugged in. Drives are ejected from the Mac first; devices are released before the machine state is saved (QEMU can't save them). The VM gets 8 USB ports, so a saved state from an earlier version is discarded once.
+- USB sharing (Sharing > USB devices; `dinghy usb list|share|unshare`): hand a USB device from the Mac to Windows and back while it runs. Sharing is remembered and re-applied when Windows starts and the device is plugged in. USB drives aren't supported as USB devices (macOS keeps them; QEMU can only take them with root, and raw-disk sharing needed Full Disk Access plus repeated admin prompts): the picker offers a drive's mounted volumes as folder shares instead. Devices are released before the machine state is saved (QEMU can't save them). The VM gets 8 USB ports, so a saved state from an earlier version is discarded once.
 - Run as Administrator: right-click an app in the window, right-click (or hold ⌥ and click) an app in the menu bar, or `dinghy launch "<app>" --admin`. Windows can't show its UAC prompt through RemoteApp, so the app is started elevated by a one-shot scheduled task running as your (administrator) account; the task deletes itself when the app exits. Store apps can't be elevated, and a non-administrator account gets a clear message.
 - VM power settings (Resources > Power; `dinghy config`): start Windows when WinDinghy opens (`vmAutoStart`, with a login delay `vmStartDelaySec`, default 30 s, applied only when WinDinghy opens at login); on quit, save the running machine, shut it down, or leave it (`vmOnQuit`, default save); after N idle minutes pause, save or shut down (`vmIdleAction`, default off). Saved states are single-use, discarded if the disk, QEMU or the VM's size changed, and need RAM + `vmMinFreeGB` (default 2 GB) free: otherwise WinDinghy says so and shuts down normally. CLI: `dinghy vm autostart|save|pause|resume|quit|idle`; `dinghy vm status` shows paused/saved state and free space. Settings call out "start at login" mismatches. Setup Check and `dinghy doctor` verify free space.
 - Snapshots check the same free-space floor first.
 - Windows sign-in controls (Account & Activation): see the current account, show or copy its password, change it or generate a new one, switch to another account or create one. CLI: `dinghy password show|set|random`, `dinghy user list|use <name> [--create] [--admin]`.
 - The setup window asks for a Windows password (blank generates one); the account's full name is your macOS name (`--fullname`).
-
-### Added
-
 - Reset & uninstall (Storage & Backup): rewind to the clean install, reinstall Windows (optional safety export first, same account and resources), or remove Windows from this Mac. CLI: `dinghy vm reinstall --yes [--backup <path>]`, `dinghy uninstall [--yes] [--purge-cache] [--purge-settings]`.
 
 ### Fixed
 
+- Saving or pausing Windows freezes its clock, which used to be reported as a clock error after the VM came back. The clock is now set from your Mac automatically after every start, restore and resume, and you're only told if that sync fails.
+- Unknown-device noise in Device Manager: the QEMU platform devices Windows has no ARM64 driver for (virtio-mmio slots, fw_cfg) now bind to Microsoft's own null driver, and leftover install-media devices are cleaned up (`payload/guest-fixes.ps1`, run by setup).
+- USB drives that Windows binds to UAS are switched to the Bulk-Only driver, which QEMU's usb-host handles reliably.
+- Windows folder redirection (Documents, Downloads, ...) defaulted to on but was never written to Windows unless you toggled it and pressed Apply. It is now applied automatically and kept enforced: dinghy compares the real registry values before each app launch and after Windows starts, and a "WinDinghy Folders" logon task in Windows re-asserts a policy file (`C:\ProgramData\WinDinghy\folders.json`) at every sign-in.
+- A Windows restart under a long-lived session no longer shows a "Connection failed" dialog.
 - The managed VM no longer starts QEMU with `-daemonize` (saving state from the forked process crashed QEMU). A VM started by an older version shuts down normally once, then saves work.
-
 - Windows Desktop (and the VM's own screen) no longer sign in as the built-in Administrator after a fresh install. Setup used to restart the VM as soon as the guest agent answered, cutting off the first-logon script before it retired the Administrator account and its auto-logon. Setup now waits for that script to finish, then disables the Administrator; `dinghy fix admin` repairs an existing VM.
 - Opening WinDinghy with no Windows installed now opens the window (the setup wizard) instead of only adding a menu-bar icon.
 - Removing Windows shows a progress bar, and afterwards the window offers only the setup wizard instead of settings that can't work without a VM. Without a managed VM, the window goes to setup unless advanced mode is on; a custom VM folder is honored.
@@ -114,6 +116,7 @@ First versioned release.
   windows with the app name instead of "app" (also fixes the menu-bar
   window list showing every window as "app").
 
-[Unreleased]: https://github.com/chrisskurda/windinghy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/chrisskurda/windinghy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/chrisskurda/windinghy/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/chrisskurda/windinghy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/chrisskurda/windinghy/releases/tag/v0.1.0

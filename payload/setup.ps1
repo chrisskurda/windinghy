@@ -100,6 +100,9 @@ if (-not (Get-NetFirewallRule -DisplayName "WinBoat API 7148" -ErrorAction Silen
     New-NetFirewallRule -DisplayName "WinBoat API 7148" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 7148 -Profile Any | Out-Null
 }
 
+# --- 3b. Device fixes (unknown QEMU devices, UAS -> Bulk-Only for shared USB drives) ---
+try { & (Join-Path $WB "guest-fixes.ps1") -Install } catch { Warn "Device fixes failed (non-fatal): $_" }
+
 # --- 4. RDP robustness on QEMU/vmnet ---
 # UDP transport over QEMU shared networking is unreliable and can wedge the
 # RDP security layer (client sees generic security errors, e.g. 0x1807, until

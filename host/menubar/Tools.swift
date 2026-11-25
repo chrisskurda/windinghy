@@ -636,11 +636,12 @@ struct AboutSection: View {
 
 // MARK: - USB sharing (managed VM)
 
-struct UsbDevice: Identifiable, Hashable {
+struct UsbDevice: Identifiable {
     let id: String            // "vvvv:pppp"
     let name: String
     let vendor: String
     let storage: Bool
+    let volumes: [(name: String, path: String)]   // mounted volumes of a drive
     let hid: Bool
     var shared: Bool          // remembered: re-shared whenever Windows starts and it's plugged in
     var attached: Bool        // in Windows right now
@@ -665,6 +666,9 @@ final class UsbStore: ObservableObject {
             self.devices = ((o["devices"] as? [[String: Any]]) ?? []).map {
                 UsbDevice(id: $0["id"] as? String ?? "", name: $0["name"] as? String ?? "USB device",
                           vendor: $0["vendor"] as? String ?? "", storage: $0["storage"] as? Bool ?? false,
+                          volumes: (($0["volumes"] as? [[String: Any]]) ?? []).compactMap { v in
+                              guard let n = v["name"] as? String, let p = v["path"] as? String else { return nil }
+                              return (name: n, path: p) },
                           hid: $0["hid"] as? Bool ?? false, shared: $0["shared"] as? Bool ?? false,
                           attached: $0["attached"] as? Bool ?? false, absent: $0["absent"] as? Bool ?? false)
             }
@@ -688,6 +692,7 @@ final class UsbStore: ObservableObject {
 
 struct UsbSection: View {
     @ObservedObject private var usb = UsbStore.shared
+    @EnvironmentObject var store: AppStore
     private let tick = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -696,19 +701,41 @@ struct UsbSection: View {
                 Text("No USB devices found. Plug one in and it shows up here.").foregroundStyle(.secondary)
             }
             ForEach(usb.devices) { d in
-                Toggle(isOn: Binding(get: { d.shared }, set: { usb.set(d, share: $0) })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(d.name)
-                        Text(detail(d)).font(.system(size: 12)).foregroundStyle(.secondary)
+                if d.storage {
+                    // USB drives aren't supported as USB devices: their volumes can be shared as folders instead.
+                    VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(d.name)
+                            Text("USB drive · not supported as a USB device").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        if d.volumes.isEmpty {
+                            Text("Not mounted on the Mac, so there's no folder to share.").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        ForEach(d.volumes, id: \.path) { v in
+                            Toggle(isOn: Binding(get: { store.folders.contains(v.path) },
+                                                 set: { on in
+                                                     if on { if !store.folders.contains(v.path) { store.folders.append(v.path) } }
+                                                     else { store.folders.removeAll { $0 == v.path } }
+                                                 })) {
+                                Text("Share \"\(v.name)\" as a folder").font(.system(size: 13))
+                            }
+                        }
                     }
+                } else {
+                    Toggle(isOn: Binding(get: { d.shared }, set: { usb.set(d, share: $0) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(d.name)
+                            Text(detail(d)).font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .disabled(usb.busy != nil || d.absent && !d.shared)
                 }
-                .disabled(usb.busy != nil || d.absent && !d.shared)
             }
             if let m = usb.message {
                 Label(m, systemImage: "exclamationmark.triangle.fill").font(.system(size: 12)).foregroundStyle(Color.orange)
             }
         } header: { Text("USB devices") } footer: {
-            Text("A shared device disappears from the Mac and appears in Windows, and comes back to the Mac when you turn it off. It stays shared whenever it's plugged in and Windows starts. Drives are ejected from the Mac first. Keyboards, mice and other input devices stay with the Mac.")
+            Text("A shared device disappears from the Mac and appears in Windows, and comes back to the Mac when you turn it off. It stays shared whenever it's plugged in and Windows starts. USB drives aren't supported: share a drive's folder instead (it appears in Windows as \\\\tsclient\\<name>, applies the next time an app opens, and can't be formatted or flashed from Windows). Keyboards, mice and other input devices stay with the Mac.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
         }
         .toggleStyle(.switch)
@@ -721,7 +748,6 @@ struct UsbSection: View {
         if d.absent { parts.append("Not plugged in") }
         else if d.attached { parts.append("In Windows now") }
         else if d.shared { parts.append(usb.running ? "Couldn't be shared: unplug and replug it, or turn it off and on" : "Shared when Windows starts") }
-        else if d.storage { parts.append("Drive") }
         if !d.vendor.isEmpty && !d.absent { parts.append(d.vendor) }
         parts.append(d.id)
         return parts.joined(separator: " · ")

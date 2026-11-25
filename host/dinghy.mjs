@@ -31,7 +31,7 @@ import * as VM from "./vm.mjs";
 
 // Single source of truth for the WinDinghy version. Release: bump this,
 // move CHANGELOG "Unreleased" entries under the new version, tag vX.Y.Z.
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");

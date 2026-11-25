@@ -133,8 +133,9 @@ export function screenshot(cfg, file = files(cfg).shot) {
 // Host USB devices are handed to the guest with QEMU's usb-host (libusb), hot-plugged over QMP onto the
 // xhci controller's spare ports. A device is identified by "vvvv:pppp" (hex vendor:product). Plugging in
 // two identical devices shares the first one libusb finds.
-// - macOS keeps a device's own driver attached: a USB drive's volumes must be unmounted first (done here),
-//   and keyboards/mice/other HID devices owned by the system usually can't be claimed at all.
+// - macOS keeps a device's own driver attached, so passthrough can't take USB drives (they're offered as
+//   folder shares instead; raw-disk sharing was tried and needs Full Disk Access plus repeated admin
+//   prompts) and keyboards/mice/other HID devices owned by the system usually can't be claimed at all.
 // - usb-host can't be saved with the machine, so saveState detaches everything first; callers re-attach
 //   the remembered devices (cfg.usbShared) with usbSync once the VM is back.
 
@@ -159,11 +160,18 @@ export function usbDevices() {
         if (vid === 0x05ac && !/iphone|ipad|ipod/i.test(name)) continue;   // Apple built-ins (keyboard, trackpad, Bluetooth, camera)
         // Whole-disk BSD names under this device (disk4, not disk4s1): these are its drives.
         const disks = [...new Set([...block.matchAll(/"BSD Name" = "(disk\d+)"/g)].map(m => m[1]))];
+        // Mounted volumes on those disks (disk4s1, ...): what can be shared as a folder.
+        const volumes = [];
+        for (const part of new Set([...block.matchAll(/"BSD Name" = "(disk\d+s\d+)"/g)].map(m => m[1]))) {
+            const i = spawnSync("diskutil", ["info", part], { encoding: "utf8", timeout: 10000 }).stdout || "";
+            const mp = i.match(/Mount Point:\s+(\/.+)/)?.[1]?.trim();
+            if (mp) volumes.push({ name: i.match(/Volume Name:\s+(.+)/)?.[1]?.trim() || path.basename(mp), path: mp });
+        }
         out.push({
             id: usbId(vid, pid), name,
             vendor: str("USB Vendor Name") || str("kUSBVendorString"),
             serial: str("USB Serial Number") || str("kUSBSerialNumberString"),
-            storage: disks.length > 0, disks,
+            storage: disks.length > 0, disks, volumes,
             // libusb can't open a device macOS has bound a driver to; HID (keyboards, mice) is the usual case
             hid: cls === 3,
         });
@@ -187,15 +195,15 @@ export function usbAttach(cfg, id) {
     if (usbAttached(cfg).includes(id)) return true;
     const dev = usbDevices().find(d => d.id === id);
     if (!dev) throw new Error("That device isn't plugged into this Mac.");
-    // A drive macOS has mounted belongs to macOS until it's unmounted (data isn't lost: it just goes away from the Finder).
-    for (const d of dev.disks) spawnSync("diskutil", ["unmountDisk", d], { encoding: "utf8", timeout: 30000 });
+    // macOS keeps USB drives (its driver can't be taken without root), so they're offered as folder shares instead.
+    if (dev.storage) throw new Error(`USB drives aren't supported as USB devices. Share ${dev.name}'s folder instead (Sharing > USB devices).`);
     const [v, p] = id.split(":");
     const r = qmpTry(cfg, "device_add", { driver: "usb-host", id: usbDevId(id), vendorid: parseInt(v, 16), productid: parseInt(p, 16) });
     if (!r.ok) {
         const why = r.error;
         if (/No free .*port|no free/i.test(why)) throw new Error("All of Windows's USB ports are in use: stop sharing another device first.");
         if (/permission|access|busy|claim|libusb|open/i.test(why))
-            throw new Error(`macOS won't let WinDinghy take ${dev.name}${dev.hid ? " (keyboards, mice and other input devices stay with the Mac)" : dev.storage ? " (eject it in the Finder first if it still shows up there)" : ""}. (${why})`);
+            throw new Error(`macOS won't let WinDinghy take ${dev.name}${dev.hid ? " (keyboards, mice and other input devices stay with the Mac)" : ""}. (${why})`);
         throw new Error(`Couldn't share ${dev.name}: ${why}`);
     }
     return true;
@@ -204,9 +212,12 @@ export function usbAttach(cfg, id) {
 export function usbDetach(cfg, id) {
     if (!validUsbId(id)) throw new Error(`"${id}" isn't a USB id (expected vvvv:pppp).`);
     id = id.toLowerCase();
-    if (!usbAttached(cfg).includes(id)) return true;
-    const r = qmpTry(cfg, "device_del", { id: usbDevId(id) });
-    if (!r.ok) throw new Error(`Couldn't release the device: ${r.error}`);
+    const wasShared = usbAttached(cfg).includes(id);
+    if (wasShared) {
+        const r = qmpTry(cfg, "device_del", { id: usbDevId(id) });
+        if (!r.ok) throw new Error(`Couldn't release the device: ${r.error}`);
+        for (let i = 0; i < 20 && usbAttached(cfg).includes(id); i++) spawnSync("sleep", ["0.25"]);
+    }
     return true;
 }
 
