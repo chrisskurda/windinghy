@@ -221,7 +221,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var updating = false
     var runWindow: RunWindow?
     var searchQuery = ""
-    var searchField: NSSearchField?
+    var searchField: MenuSearchField?
     var searchItem: NSMenuItem?
     var currentAppItems: [NSMenuItem] = []
     var lastDiscover = Date.distantPast
@@ -647,10 +647,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     func menuNeedsUpdate(_ menu: NSMenu) {
         rebuildMenu()
         poll()
-        // Route typing to the search box instead of menu type-select
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let field = self.searchField else { return }
-            field.window?.makeFirstResponder(field)
+    }
+
+    // Route typing to the search box. Without focus there, the menu's own type-select takes the keys,
+    // and that only matches the rows already showing (Favorites), never the apps under All Apps.
+    // The field also claims focus itself when it lands in the menu's window (MenuSearchField); these
+    // retries cover a menu window that is reused or slow to appear. Timers run in .common modes
+    // because the menu tracks in its own run-loop mode.
+    func menuWillOpen(_ menu: NSMenu) {
+        for delay in [0.0, 0.05, 0.2] {
+            let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in self?.searchField?.claimFocus() }
+            RunLoop.main.add(t, forMode: .common)
         }
     }
 
@@ -714,7 +721,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // would drop keyboard focus.
     func makeSearchItem() -> NSMenuItem {
         if let item = searchItem { return item }
-        let field = NSSearchField(frame: NSRect(x: 12, y: 1, width: 212, height: 26))
+        let field = MenuSearchField(frame: NSRect(x: 12, y: 1, width: 212, height: 26))
         field.placeholderString = "Search Windows apps"
         field.delegate = self
         field.sendsSearchStringImmediately = true
@@ -1397,6 +1404,20 @@ app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()
 
+
+/// The menu's search box. It takes keyboard focus as soon as it is placed in the menu's window, so typing
+/// filters every app instead of falling through to the menu's type-select.
+final class MenuSearchField: NSSearchField {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        claimFocus()
+    }
+
+    func claimFocus() {
+        guard let w = window, currentEditor() == nil else { return }
+        w.makeFirstResponder(self)
+    }
+}
 
 /// A menu row for one Windows app. Menus ignore right-clicks on plain rows, so this draws its own row
 /// (matching the system look) and handles the mouse itself.

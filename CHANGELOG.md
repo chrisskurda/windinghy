@@ -8,6 +8,10 @@ bumps may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- Menu bar search: typing could match only the Favorites rows instead of every app, because the search box did not reliably get keyboard focus when the menu opened.
+
 ## [0.3.0] - 2026-11-25
 
 The everyday-use release: USB sharing, Run as Administrator, VM power settings (save, pause, auto-start), account controls, reset & uninstall, and enforced folder redirection.
