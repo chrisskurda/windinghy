@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- RoboDinghy app icon (codename): WinDinghy's sibling. A dinghy whose mast tops out in a small
+       broadcast antenna (the remote screen it streams), on a teal-green tile over a deep sea. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#46DDB8"/>
+      <stop offset="1" stop-color="#0C8F86"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#086A66"/>
+      <stop offset="1" stop-color="#03403F"/>
+    </linearGradient>
+    <linearGradient id="hull" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D3F3EA"/>
+    </linearGradient>
+    <linearGradient id="jib" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E4FBF4"/>
+      <stop offset="1" stop-color="#B9EEDF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS icon plate: 824pt rounded tile inside the 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sky)"/>
+
+  <!-- antenna: signal arcs either side of the masthead -->
+  <g fill="none" stroke="#FFFFFF" stroke-linecap="round">
+    <path d="M538.8 131.6 A52 52 0 0 1 538.8 198.4" stroke-width="16" stroke-opacity=".95"/>
+    <path d="M459.2 131.6 A52 52 0 0 0 459.2 198.4" stroke-width="16" stroke-opacity=".95"/>
+    <path d="M560.3 113.6 A80 80 0 0 1 560.3 216.4" stroke-width="14" stroke-opacity=".6"/>
+    <path d="M437.7 113.6 A80 80 0 0 0 437.7 216.4" stroke-width="14" stroke-opacity=".6"/>
+  </g>
+
+  <!-- mast with the antenna rod on top -->
+  <rect x="490" y="165" width="18" height="500" rx="9" fill="#FFFFFF"/>
+  <circle cx="499" cy="165" r="21" fill="#FFC14D" stroke="#FFFFFF" stroke-width="8"/>
+
+  <!-- jib -->
+  <path d="M470 330 L470 625 L292 625 Z" fill="url(#jib)" stroke="#E4FBF4" stroke-width="14" stroke-linejoin="round"/>
+
+  <!-- mainsail, with a gently curved leech and one batten seam -->
+  <path d="M528 255 Q650 420 786 625 L528 625 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M540 470 L668 470" stroke="#BDEBDF" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- hull -->
+  <path d="M222 655 Q512 722 802 655 Q512 872 222 655 Z" fill="url(#hull)" stroke="#FFFFFF" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M222 655 Q512 722 802 655" fill="none" stroke="#FFC14D" stroke-width="22" stroke-linecap="round"/>
+
+  <!-- sea, following the bottom of the tile -->
+  <path d="M100 752 Q151.5 728 203 752 T306 752 T409 752 T512 752 T615 752 T718 752 T821 752 T924 752
+           L924 739 A185 185 0 0 1 739 924 L285 924 A185 185 0 0 1 100 739 Z" fill="url(#sea)"/>
+  <path d="M200 826 Q240 804 280 826 T360 826 T440 826" fill="none" stroke="#46DDB8" stroke-opacity=".5" stroke-width="12" stroke-linecap="round"/>
+  <path d="M570 856 Q610 834 650 856 T730 856 T810 856" fill="none" stroke="#46DDB8" stroke-opacity=".5" stroke-width="12" stroke-linecap="round"/>
+</svg>

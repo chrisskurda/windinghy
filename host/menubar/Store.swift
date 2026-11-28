@@ -79,20 +79,14 @@ enum SetupPhase: Equatable {
 }
 
 /// Read/write single keys of ~/.config/windinghy/config.json (shared with the dinghy CLI).
+/// A thin static front for WBConfig.file (JSONConfigFile, host/common/swift).
 enum ConfigFile {
-    static func dict() -> [String: Any] {
-        guard let data = FileManager.default.contents(atPath: WBConfig.path),
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
-        return json
-    }
-    static func string(_ key: String, _ def: String) -> String { (dict()[key] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? def }
-    static func int(_ key: String, _ def: Int) -> Int { (dict()[key] as? Int) ?? def }
-    static func bool(_ key: String, _ def: Bool) -> Bool {
-        guard let v = dict()[key] as? String else { return def }
-        return v == "on"
-    }
-    static func set(_ key: String, _ value: Any) { WBConfig.update(key, value) }
-    static func setBool(_ key: String, _ on: Bool) { WBConfig.update(key, on ? "on" : "off") }
+    static func dict() -> [String: Any] { WBConfig.file.dict() }
+    static func string(_ key: String, _ def: String) -> String { WBConfig.file.string(key, def) }
+    static func int(_ key: String, _ def: Int) -> Int { WBConfig.file.int(key, def) }
+    static func bool(_ key: String, _ def: Bool) -> Bool { WBConfig.file.bool(key, def) }
+    static func set(_ key: String, _ value: Any) { WBConfig.file.set(key, value) }
+    static func setBool(_ key: String, _ on: Bool) { WBConfig.file.setBool(key, on) }
 }
 
 final class AppStore: ObservableObject {
@@ -450,61 +444,37 @@ final class AppStore: ObservableObject {
     var reinstalling = false
 
     func beginSetup(allowUntested: Bool = false) {
-        guard let node = findNode(), let dinghy = findDinghy() else {
+        guard dinghyCLI.resolve() != nil else {
             setupPhase = .failed("Can't find node or dinghy.mjs. Run `dinghy vm create` in a terminal instead.")
             return
         }
         setupPhase = .installing(pct: 1, title: "Preparing…")
         var args = reinstalling
-            ? [dinghy, "vm", "reinstall", "--yes", "--progress"] + (reinstallBackup.map { ["--backup", $0] } ?? [])
-            : [dinghy, "vm", "create", "--progress"]
+            ? ["vm", "reinstall", "--yes", "--progress"] + (reinstallBackup.map { ["--backup", $0] } ?? [])
+            : ["vm", "create", "--progress"]
         reinstalling = false   // a retry after a failure must create, not reinstall (the old VM is already gone)
         args += [ "--disk", "\(diskGB)", "--ram", "\(ramGB * 1024)", "--cpus", "\(cores)"]
         args += ["--user", setupUser.isEmpty ? "WinDinghy" : setupUser, "--fullname", NSFullUserName()]
         if allowUntested { args.append("--allow-untested") }
         if let iso = setupISO { args += ["--iso", iso] }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: node)
-        p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        var env: [String: String] = [:]
         if !setupPassword.isEmpty { env["WINDINGHY_PASSWORD"] = setupPassword }
-        p.environment = env
-        let pipe = Pipe()
-        p.standardOutput = pipe; p.standardError = pipe
         var tail: [String] = []
-        var buffer = ""
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let chunk = String(data: d, encoding: .utf8) else { return }
-            buffer += chunk
-            while let nl = buffer.firstIndex(of: "\n") {
-                let line = String(buffer[buffer.startIndex..<nl])
-                buffer = String(buffer[buffer.index(after: nl)...])
-                if line.hasPrefix("PROGRESS:") {
-                    let parts = line.dropFirst(9).split(separator: ":", maxSplits: 1).map(String.init)
-                    if parts.count == 2, let pct = Double(parts[0]) {
-                        DispatchQueue.main.async { self?.setupPhase = .installing(pct: pct, title: parts[1]) }
-                    }
-                } else if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                    tail.append(line); if tail.count > 6 { tail.removeFirst() }
-                }
+        let err = dinghyCLI.progress(args, extraEnv: env, onProgress: { [weak self] pct, title in
+            self?.setupPhase = .installing(pct: pct, title: title)
+        }, onLine: { line in
+            tail.append(line); if tail.count > 6 { tail.removeFirst() }
+        }, done: { [weak self] status in
+            guard let self else { return }
+            if status == 0 {
+                self.setupPassword = ""
+                self.refresh()
+                self.setupPhase = .done(apps: self.apps.count)
+            } else {
+                self.setupPhase = .failed(tail.filter { $0.contains("UNTESTED") }.first ?? tail.suffix(3).joined(separator: "\n"))
             }
-        }
-        p.terminationHandler = { [weak self] proc in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if proc.terminationStatus == 0 {
-                    self.setupPassword = ""
-                    self.refresh()
-                    self.setupPhase = .done(apps: self.apps.count)
-                } else {
-                    self.setupPhase = .failed(tail.filter { $0.contains("UNTESTED") }.first ?? tail.suffix(3).joined(separator: "\n"))
-                }
-            }
-        }
-        do { try p.run() } catch { setupPhase = .failed(error.localizedDescription) }
+        })
+        if let err { setupPhase = .failed(err.localizedDescription) }
     }
 }
 

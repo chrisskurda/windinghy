@@ -28,6 +28,16 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import * as G from "./guest.mjs";
 import * as VM from "./vm.mjs";
+// Shared plumbing (also used by robodinghy). Relative imports: in the app bundle these sit in
+// Contents/Resources/common/ next to this file, as in the checkout.
+import { say, stepSay, waitFor, readStdinJson, portOpen, logTail, safeName, makeProgress, runUpdater } from "./common/cli.mjs";
+import { asDialog, asq, notify as notifyTitled, showError as showErrorTitled } from "./common/macos.mjs";
+import { makeConfig, sanitizer, checkConfigValue, coerceConfigValue } from "./common/config.mjs";
+import { makeKeychain } from "./common/keychain.mjs";
+import { makeAppManagement } from "./common/permissions.mjs";
+import * as L from "./common/launchers.mjs";
+import { loadCompat as loadCompatIn, capture, printAbout } from "./common/about.mjs";
+import { makeDoctor } from "./common/doctor.mjs";
 
 // Single source of truth for the WinDinghy version. Release: bump this,
 // move CHANGELOG "Unreleased" entries under the new version, tag vX.Y.Z.
@@ -115,8 +125,7 @@ const POWER_NUMBERS = [["vmStartDelaySec", 0, 600], ["vmIdleMinutes", 1, 1440], 
 // Make a saved config safe to use whatever state it's in (hand-edited, from an older version, left
 // over from a removed VM or build). Returns the list of things it fixed.
 function sanitizeConfig(cfg) {
-    const notes = [];
-    const fix = (cond, msg, apply) => { if (cond) { apply(); notes.push(msg); } };
+    const { notes, fix, oneOf, numbers } = sanitizer(cfg, DEFAULTS);
     fix(!["utm", "qemu"].includes(cfg.vmBackend), `unknown vmBackend "${cfg.vmBackend}" -> utm`, () => { cfg.vmBackend = "utm"; });
     fix(!["auto", "native", "windows-app"].includes(cfg.client), `unknown client "${cfg.client}" -> auto`, () => { cfg.client = "auto"; });
     for (const k of ["apiPort", "rdpPort"])
@@ -127,12 +136,8 @@ function sanitizeConfig(cfg) {
             "managed VM address reset to 127.0.0.1 and its forwarded ports", () => { cfg.host = "127.0.0.1"; cfg.rdpPort = VM.RDP_PORT; cfg.apiPort = VM.API_PORT; });
         fix(cfg.vmName !== VM.VM_NAME, `managed VM name "${cfg.vmName}" -> ${VM.VM_NAME}`, () => { cfg.vmName = VM.VM_NAME; });
     }
-    const oneOf = (k, vals) => fix(!vals.includes(cfg[k]), `bad ${k} "${cfg[k]}" -> ${DEFAULTS[k]}`, () => { cfg[k] = DEFAULTS[k]; });
     oneOf("vmAutoStart", ["on", "off"]); oneOf("vmOnQuit", ["save", "shutdown", "keep"]); oneOf("vmIdleAction", ["off", "pause", "save", "shutdown"]);
-    for (const [k, lo, hi] of POWER_NUMBERS) {
-        fix(typeof cfg[k] === "string" && /^\d+$/.test(cfg[k]), `${k} was text -> number`, () => { cfg[k] = Number(cfg[k]); });
-        fix(!Number.isInteger(cfg[k]) || cfg[k] < lo || cfg[k] > hi, `bad ${k} "${cfg[k]}" -> ${DEFAULTS[k]}`, () => { cfg[k] = DEFAULTS[k]; });
-    }
+    numbers(POWER_NUMBERS);
     fix(cfg.nativeBin && !fs.existsSync(cfg.nativeBin), `nativeBin ${cfg.nativeBin} no longer exists (removed volume or build) -> use the bundled client`, () => { cfg.nativeBin = ""; });
     if (cfg.profiles === undefined) cfg.profiles = {};   // absent is normal (nothing saved yet)
     fix(!cfg.profiles || typeof cfg.profiles !== "object" || Array.isArray(cfg.profiles), "saved backend profiles were corrupt -> reset", () => { cfg.profiles = {}; });
@@ -150,25 +155,8 @@ function sanitizeConfig(cfg) {
     return notes;
 }
 
-function loadConfig() {
-    migrateLegacyPaths();
-    let cfg;
-    try {
-        cfg = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")) };
-    } catch (e) {
-        cfg = { ...DEFAULTS };
-        if (fs.existsSync(CONFIG_PATH)) {
-            // Unreadable config: keep a copy for inspection and start clean instead of failing.
-            const bak = `${CONFIG_PATH}.broken-${Date.now()}`;
-            try { fs.copyFileSync(CONFIG_PATH, bak); console.error(`WinDinghy: config.json was unreadable; saved a copy as ${path.basename(bak)} and started fresh.`); } catch {}
-            try { saveConfig(cfg); } catch {}
-        }
-    }
-    const repaired = sanitizeConfig(cfg);
-    if (repaired.length) {
-        for (const n of repaired) console.error(`WinDinghy: repaired settings: ${n}`);
-        try { saveConfig(cfg); } catch {}
-    }
+// Pre-rename installs kept launchers in ~/Applications/WinBoat: move them (runs after sanitizing).
+function migrateWinBoatAppsDir(cfg, save) {
     const oldAppsDir = path.join(os.homedir(), "Applications", "WinBoat");
     if (cfg.appsDir === oldAppsDir) {
         cfg.appsDir = DEFAULTS.appsDir;
@@ -177,15 +165,17 @@ function loadConfig() {
                 fs.renameSync(oldAppsDir, cfg.appsDir);
             }
         } catch {}
-        saveConfig(cfg);
+        save(cfg);
     }
-    return cfg;
 }
 
-function saveConfig(cfg) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
-}
+const configFile = makeConfig({
+    path: CONFIG_PATH, defaults: DEFAULTS, logPrefix: "WinDinghy:",
+    migrate: migrateLegacyPaths, sanitize: sanitizeConfig, postLoad: migrateWinBoatAppsDir,
+});
+
+function loadConfig() { return configFile.load(); }
+function saveConfig(cfg) { configFile.save(cfg); }
 
 // ---------- advanced mode ----------
 // The supported setup is the VM WinDinghy manages itself (dinghy vm create). Anything else (UTM or
@@ -282,101 +272,33 @@ function rdpForDesktop(cfg) {
 
 // ---------- .app bundle generation ----------
 
-function safeName(name) {
-    return name.replace(/[/:]/g, "-").replace(/\s+/g, " ").trim();
-}
-
 // Windows App titles RemoteApp windows after the .rdp filename, so name the
 // file after the app (must also be safe to embed in the launcher script).
 function rdpFileName(name) {
     return (safeName(name).replace(/["'`$\\]/g, "") || "app") + ".rdp";
 }
 
-function makeIcns(pngBase64, icnsPath, tmpDir) {
-    // Guest icons are 32x32 PNGs; upscale into a minimal iconset.
-    const src = path.join(tmpDir, "src.png");
-    fs.writeFileSync(src, Buffer.from(pngBase64, "base64"));
-    const iconset = path.join(tmpDir, "app.iconset");
-    fs.mkdirSync(iconset, { recursive: true });
-    const sizes = [16, 32, 128, 256];
-    for (const s of sizes) {
-        spawnSync("sips", ["-z", String(s), String(s), src, "--out", path.join(iconset, `icon_${s}x${s}.png`)], { stdio: "ignore" });
-    }
-    const r = spawnSync("iconutil", ["-c", "icns", iconset, "-o", icnsPath], { stdio: "ignore" });
-    fs.rmSync(iconset, { recursive: true, force: true });
-    fs.rmSync(src, { force: true });
-    return r.status === 0;
-}
+// Launcher bundles (layout and launcher script: common/launchers.mjs). The launcher runs this file
+// (its own path, not the common module's) with `open-rdp <Resources dir>`.
+const LAUNCHER_HEADER = "# Generated by dinghy sync. Launches via dinghy (auto-rediscovers the VM, boots it\n# if needed); falls back to the static .rdp if node/dinghy has moved.\n";
 
 function writeAppBundle(cfg, dirName, displayName, rdpContent, iconBase64, tmpDir, appMeta) {
-    const appPath = path.join(cfg.appsDir, `${dirName}.app`);
-    const contents = path.join(appPath, "Contents");
-    const macos = path.join(contents, "MacOS");
-    const resources = path.join(contents, "Resources");
-    fs.rmSync(appPath, { recursive: true, force: true });
-    fs.mkdirSync(macos, { recursive: true });
-    fs.mkdirSync(resources, { recursive: true });
-
     // Static .rdp as a last-resort fallback; normal launches go through
     // `dinghy open-rdp`, which regenerates it with the VM's current address.
     const rdpFile = rdpFileName(displayName);
-    fs.writeFileSync(path.join(resources, rdpFile), rdpContent);
-    fs.writeFileSync(path.join(resources, "app.json"), JSON.stringify(appMeta ?? { desktop: true }, null, 2));
-
-    let iconEntry = "";
-    if (iconBase64 && makeIcns(iconBase64, path.join(resources, "app.icns"), tmpDir)) {
-        iconEntry = "    <key>CFBundleIconFile</key>\n    <string>app</string>\n";
-    } else if (appMeta?.desktop) {
+    const product = {
+        bundleIdPrefix: "app.windinghy.",
+        cliPath: fileURLToPath(import.meta.url),
+        subcommand: "open-rdp",
+        header: LAUNCHER_HEADER,
+        fallback: `exec open -a "Windows App" "$DIR/${rdpFile}"`,
+    };
+    return L.writeAppBundle(product, {
+        appsDir: cfg.appsDir, dirName, displayName, meta: appMeta, iconBase64, tmpDir,
         // The full desktop has no guest icon of its own: use the bundled four-pane window.
-        const own = [path.join(__dirname, "desktop.icns"), path.join(__dirname, "icons", "desktop.icns")].find(f => fs.existsSync(f));
-        if (own) { fs.copyFileSync(own, path.join(resources, "app.icns")); iconEntry = "    <key>CFBundleIconFile</key>\n    <string>app</string>\n"; }
-    }
-
-    const bundleId = "app.windinghy." + dirName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    fs.writeFileSync(
-        path.join(contents, "Info.plist"),
-        `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleName</key>
-    <string>${displayName.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</string>
-    <key>CFBundleIdentifier</key>
-    <string>${bundleId}</string>
-    <key>CFBundleExecutable</key>
-    <string>launcher</string>
-${iconEntry}    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-`);
-
-    const launcher = path.join(macos, "launcher");
-    // Never pin a versioned path (brew's Cellar/node/<version> disappears on upgrade/cleanup):
-    // prefer the stable symlinks, then PATH, and use the recorded execPath only as a last resort.
-    const nodeBin = process.execPath;
-    const wbmPath = fileURLToPath(import.meta.url);
-    fs.writeFileSync(
-        launcher,
-        `#!/bin/bash
-# Generated by dinghy sync. Launches via dinghy (auto-rediscovers the VM, boots it
-# if needed); falls back to the static .rdp if node/dinghy has moved.
-DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
-NODE=""
-for c in /opt/homebrew/bin/node /usr/local/bin/node "$(command -v node 2>/dev/null)" "${nodeBin}"; do
-    if [ -n "$c" ] && [ -x "$c" ]; then NODE="$c"; break; fi
-done
-if [ -n "$NODE" ] && [ -f "${wbmPath}" ]; then
-    exec "$NODE" "${wbmPath}" open-rdp "$DIR"
-fi
-exec open -a "Windows App" "$DIR/${rdpFile}"
-`);
-    fs.chmodSync(launcher, 0o755);
-    return appPath;
+        defaultIcons: appMeta?.desktop ? [path.join(__dirname, "desktop.icns"), path.join(__dirname, "icons", "desktop.icns")] : [],
+        extraResources: { [rdpFile]: rdpContent },
+    });
 }
 
 // ---------- commands ----------
@@ -394,16 +316,6 @@ async function cmdStatus(cfg) {
     }
     const rdpUp = await portOpen(cfg.host, cfg.rdpPort);
     console.log(`RDP ${cfg.host}:${cfg.rdpPort} ... ${rdpUp ? "open" : "CLOSED"}`);
-}
-
-async function portOpen(host, port) {
-    const { default: net } = await import("node:net");
-    return new Promise(resolve => {
-        const s = net.connect({ host, port, timeout: 3000 });
-        s.on("connect", () => { s.destroy(); resolve(true); });
-        s.on("error", () => resolve(false));
-        s.on("timeout", () => { s.destroy(); resolve(false); });
-    });
 }
 
 async function cmdSync(cfg) {
@@ -444,12 +356,7 @@ async function cmdSync(cfg) {
     kept.add(path.basename(desktopPath));
 
     // Remove launchers for apps that disappeared from the guest
-    for (const entry of fs.readdirSync(cfg.appsDir)) {
-        if (entry.endsWith(".app") && !kept.has(entry)) {
-            fs.rmSync(path.join(cfg.appsDir, entry), { recursive: true, force: true });
-            console.log(`  removed stale ${entry}`);
-        }
-    }
+    L.sweepStale(cfg.appsDir, kept, entry => console.log(`  removed stale ${entry}`));
     fs.rmSync(tmpDir, { recursive: true, force: true });
 
     console.log(`Synced ${made} apps -> ${cfg.appsDir}`);
@@ -464,7 +371,7 @@ async function cmdSync(cfg) {
 
 function notify(msg) {
     // Launchers run without a terminal; surface progress as notifications.
-    spawnSync("osascript", ["-e", `display notification ${JSON.stringify(msg)} with title "WinDinghy"`], { stdio: "ignore" });
+    notifyTitled("WinDinghy", msg);
 }
 
 async function guestAlive(cfg, timeoutMs = 2500) {
@@ -692,31 +599,7 @@ function winUser(cfg) {
     return (cfg.username || "").replace("/", "\\");
 }
 
-function keychainGet(user) {
-    const r = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", user, "-w"], { encoding: "utf8" });
-    return r.status === 0 ? r.stdout.replace(/\n$/, "") : null;
-}
-
-function keychainSet(user, pw) {
-    // `security -i` reads the command from stdin so the password never shows up in argv.
-    const q = v => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-    const r = spawnSync("security", ["-i"], {
-        input: `add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${q(user)} -w ${q(pw)}\n`,
-        encoding: "utf8",
-    });
-    return r.status === 0;
-}
-
-function keychainDelete(user) {
-    spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", user], { stdio: "ignore" });
-}
-
-function asDialog(script) {
-    const r = spawnSync("osascript", ["-e", script], { encoding: "utf8" });
-    return r.status === 0 ? r.stdout.trim() : null;
-}
-
-const asq = t => t.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+const { get: keychainGet, set: keychainSet, del: keychainDelete } = makeKeychain(KEYCHAIN_SERVICE);
 
 function promptPassword(user, retry = false) {
     const msg = retry ? `Windows rejected the saved password for ${user}. Enter it again:` : `Enter the Windows password for ${user}. It is stored in your macOS Keychain.`;
@@ -787,10 +670,6 @@ function nativeArgs(cfg, meta, pw) {
     return a;
 }
 
-function logTail(file) {
-    try { return fs.readFileSync(file, "utf8").split("\n").slice(-40).join("\n"); } catch { return ""; }
-}
-
 // ---------- macOS App Management permission ----------
 // macOS blocks one app from modifying another app's bundle unless it is allowed in System Settings >
 // Privacy & Security > App Management. WinDinghy's launchers in ~/Applications/WinDinghy count as apps,
@@ -798,44 +677,18 @@ function logTail(file) {
 // There's no API to request it, but a probe tells us whether it's granted: try a harmless edit inside
 // an existing launcher's MacOS folder (where the signed client copy lives) and see if macOS refuses.
 
-const APP_MGMT_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles";
+const appMgmt = makeAppManagement({ appName: "WinDinghy", configDir: CONFIG_DIR, preferBinary: "freerdp" });
 
 // true = allowed (or nothing to protect yet), false = blocked
-function probeAppManagement(cfg) {
-    let apps = [];
-    try { apps = fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")); } catch {}
-    const withClient = apps.find(a => fs.existsSync(path.join(cfg.appsDir, a, "Contents", "MacOS", "freerdp"))) ?? apps[0];
-    if (!withClient) return true;
-    const probe = path.join(cfg.appsDir, withClient, "Contents", "MacOS", ".dinghy-probe");
-    try { fs.writeFileSync(probe, "1"); fs.rmSync(probe, { force: true }); return true; }
-    catch (e) { return !/^(EPERM|EACCES)$/.test(e.code ?? ""); }
-}
+function probeAppManagement(cfg) { return appMgmt.probe(cfg.appsDir); }
 
 // Prompt (native dialog) and, if asked, wait for the user to flip the switch. Returns true if allowed.
-async function ensureAppManagement(cfg, { wait = true } = {}) {
-    if (probeAppManagement(cfg)) return true;
-    const out = asDialog(`button returned of (display dialog "WinDinghy needs permission to update its app launchers.\n\nIn System Settings > Privacy & Security > App Management, turn on WinDinghy. This is a one-time step; I'll continue automatically once it's on." with title "WinDinghy" with icon caution buttons {"Not now", "Open Settings"} default button "Open Settings")`);
-    if (out !== "Open Settings") return false;
-    spawnSync("open", [APP_MGMT_PANE]);
-    if (!wait) return false;
-    console.log("Waiting for you to turn on WinDinghy under App Management (up to 3 minutes)...");
-    const ok = await waitFor(() => probeAppManagement(cfg), 180, 2500);
-    console.log(ok ? "Permission granted." : "Still not allowed: launchers can't be updated until it is.");
-    return ok;
-}
+async function ensureAppManagement(cfg, opts) { return appMgmt.ensure(cfg.appsDir, opts); }
 
 // macOS "App Management" protection blocks one app from modifying another app's bundle. The launcher
 // bundles in ~/Applications/WinDinghy count as apps, so when the menu-bar app (or dinghy started from
 // it) can't rewrite them, explain the one-time permission instead of failing silently.
-function appManagementHint(err) {
-    if (!err || !/^(EPERM|EACCES)$/.test(err.code ?? "")) return false;
-    const flag = path.join(CONFIG_DIR, "app-management-hint");
-    try { if (Date.now() - fs.statSync(flag).mtimeMs < 600000) return true; } catch {} // at most every 10 minutes
-    try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(flag, ""); } catch {}
-    const out = asDialog(`button returned of (display dialog "macOS is blocking WinDinghy from updating its app launchers (App Management protection).\n\nOpen System Settings > Privacy & Security > App Management, turn on WinDinghy, then try again." with title "WinDinghy" with icon caution buttons {"Not now", "Open Settings"} default button "Open Settings")`);
-    if (out === "Open Settings") spawnSync("open", [APP_MGMT_PANE]);
-    return true;
-}
+function appManagementHint(err) { return appMgmt.hint(err); }
 
 // Give the bundle its own copy of the client so macOS shows the app's icon and
 // name in the Dock and menu bar (it keys both off the .app containing the
@@ -957,8 +810,7 @@ function diagnoseExit(cfg, code, log, elapsedSec = 0) {
 
 // Native error screen (AppleScript dialog with a caution icon).
 function showError(title, message, logFile) {
-    const out = asDialog(`button returned of (display dialog "${asq(message)}" with title "WinDinghy: ${asq(title)}" with icon caution buttons {"Show Log", "OK"} default button "OK")`);
-    if (out === "Show Log" && logFile) spawnSync("open", ["-t", logFile]);
+    showErrorTitled(`WinDinghy: ${title}`, message, logFile);
 }
 
 // ---------- run as administrator ----------
@@ -1048,35 +900,10 @@ async function cmdOpenRdp(cfg, bundleDir, admin = false) {
 }
 
 // Local launch counts drive the menu-bar app's Favorites section.
-function bumpUsage(name) {
-    const usagePath = path.join(CONFIG_DIR, "usage.json");
-    let usage = {};
-    try { usage = JSON.parse(fs.readFileSync(usagePath, "utf8")); } catch {}
-    usage[name] = (usage[name] ?? 0) + 1;
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(usagePath, JSON.stringify(usage, null, 2));
-}
-
-// Launchers generated by older versions pin an absolute node path (e.g. brew's Cellar/node/<version>)
-// that disappears on upgrade; the launcher then falls back to Windows App.
-function staleLaunchers(cfg) {
-    const bad = [];
-    let entries = [];
-    try { entries = fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")); } catch { return bad; }
-    for (const e of entries) {
-        let t;
-        try { t = fs.readFileSync(path.join(cfg.appsDir, e, "Contents", "MacOS", "launcher"), "utf8"); } catch { continue; }
-        const pinned = t.match(/-x "([^"]+)" \] && \[ -f "([^"]+)"/) || t.match(/\[ -n "\$NODE" \] && \[ -f "([^"]+)"/);
-        if (!pinned) continue;
-        const paths = pinned.slice(1);
-        if (paths.some(p => !fs.existsSync(p))) bad.push(e);
-    }
-    return bad;
-}
+function bumpUsage(name) { L.bumpUsage(CONFIG_DIR, name); }
 
 async function cmdDoctor(cfg) {
-    const checks = [];
-    const add = (ok, label, advice) => checks.push({ ok, label, advice });
+    const { add, finish } = makeDoctor();
 
     if (nativeBin(cfg) && cfg.client !== "windows-app") {
         add(true, `native RDP client (${nativeBin(cfg)})`, "");
@@ -1132,16 +959,11 @@ async function cmdDoctor(cfg) {
     const launcherCount = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")).length : 0;
     add(launcherCount > 0, `${launcherCount} app launchers in ${cfg.appsDir}`, "Run: dinghy sync");
     // A launcher whose node/dinghy path has vanished silently falls back to Windows App
-    const stale = staleLaunchers(cfg);
+    const stale = L.staleLaunchers(cfg.appsDir);
     add(stale.length === 0, stale.length ? `${stale.length} launchers point at a missing node/dinghy (they'd open Windows App)` : "app launchers can find node and dinghy",
         "Run: dinghy sync");
 
-    let allOk = true;
-    for (const c of checks) {
-        console.log(`${c.ok ? " OK " : "FAIL"}  ${c.label}`);
-        if (!c.ok && c.advice) { console.log(`      -> ${c.advice}`); allOk = false; }
-    }
-    process.exit(allOk ? 0 : 1);
+    finish();
 }
 
 async function cmdDiscover(cfg, quiet) {
@@ -1159,10 +981,7 @@ async function cmdDiscover(cfg, quiet) {
 
 async function cmdLaunch(cfg, name, admin = false) {
     if (!name) throw new Error(`Usage: dinghy launch "<app name>"`);
-    const entries = fs.existsSync(cfg.appsDir) ? fs.readdirSync(cfg.appsDir).filter(e => e.endsWith(".app")) : [];
-    const match =
-        entries.find(e => e.toLowerCase() === `${name.toLowerCase()}.app`) ??
-        entries.find(e => e.toLowerCase().includes(name.toLowerCase()));
+    const match = L.findLauncher(cfg.appsDir, name);
     if (!match) throw new Error(`No synced app matches "${name}". Run: dinghy sync`);
     console.log(`Launching ${match.replace(/\.app$/, "")} ...`);
     await cmdOpenRdp(cfg, path.join(cfg.appsDir, match, "Contents", "Resources"), admin);
@@ -1370,9 +1189,7 @@ function validWindowsUser(u) {
 
 
 // ---------- tested versions (host/compat.json) ----------
-function loadCompat() {
-    try { return JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "compat.json"), "utf8")); } catch { return {}; }
-}
+function loadCompat() { return loadCompatIn(__dirname); }
 
 function windowsBuildTested(build) {
     return (loadCompat().windows?.tested ?? []).some(t => t.build === build);
@@ -1380,7 +1197,7 @@ function windowsBuildTested(build) {
 
 function cmdAbout(cfg, json) {
     const c = loadCompat();
-    const r = (cmd, args) => { try { return spawnSync(cmd, args, { encoding: "utf8" }).stdout.trim(); } catch { return ""; } };
+    const r = capture;
     const q = (r("qemu-system-aarch64", ["--version"]).match(/version (\S+)/) ?? [])[1] ?? (r("/opt/homebrew/bin/qemu-system-aarch64", ["--version"]).match(/version (\S+)/) ?? [])[1] ?? "not installed";
     const nb = nativeBin(cfg);
     const fr = nb ? (r(nb, ["--version"]).match(/version (\S+)/) ?? [])[1] ?? "unknown" : "not built";
@@ -1391,10 +1208,11 @@ function cmdAbout(cfg, json) {
         { name: "QEMU", have: q, tested: c.qemu?.tested ?? "", ok: q === c.qemu?.tested },
         { name: "Windows (recommended)", have: "", tested: c.windows?.recommended ?? "", ok: true },
     ];
-    if (json) { console.log(JSON.stringify(rows)); return; }
-    say(`WinDinghy ${VERSION}, built on WinBoat's guest agent ${c.winboat?.base ?? "?"}`);
-    for (const x of rows) say(`${x.name.padEnd(30)} ${String(x.have).padEnd(14)} tested: ${x.tested}${x.have && !x.ok ? "   (differs from the tested version)" : ""}${x.extra ? "   " + x.extra : ""}`);
-    say("\nNot affiliated with Microsoft or WinBoat. See NOTICE.md for credits and trademarks.");
+    printAbout(rows, {
+        json,
+        header: `WinDinghy ${VERSION}, built on WinBoat's guest agent ${c.winboat?.base ?? "?"}`,
+        footer: "\nNot affiliated with Microsoft or WinBoat. See NOTICE.md for credits and trademarks.",
+    });
 }
 
 
@@ -1412,7 +1230,7 @@ function retireAdministrator(vm) {
 async function vmCreate(cfg, args) {
     const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
     // The app window reads these lines to draw its progress bar.
-    const progress = (pct, title) => { if (args.includes("--progress")) console.log(`PROGRESS:${Math.round(pct)}:${title}`); };
+    const progress = makeProgress(args.includes("--progress"));
     progress(2, "Preparing…");
     const gb = Number(opt("--disk", 40)), ramMB = Number(opt("--ram", 4096)), cpus = Number(opt("--cpus", 4));
     if (VM.exists(cfg)) throw new Error("A WinDinghy VM already exists. Use: dinghy vm start   (or dinghy vm destroy --yes to start over)");
@@ -1593,10 +1411,6 @@ async function vmImport(cfg, src) {
 
 // ---------- the Windows sign-in: password and user ----------
 
-function readStdinJson() {
-    try { return JSON.parse(fs.readFileSync(0, "utf8") || "{}"); } catch { return {}; }
-}
-
 function strongEnough(pw) { return typeof pw === "string" && pw.length >= 8 && pw.length <= 127; }
 
 // dinghy password show | random | set   (set reads {"password": "..."} on stdin)
@@ -1690,7 +1504,7 @@ async function cmdUninstall(cfg, args) {
         say(`This will remove:\n  - the Windows VM and its snapshots (${gb} GB)\n  - the saved Windows password (Keychain)\n  - the app launchers in ${cfg.appsDir}${cache ? "\n  - cached helper downloads (virtio drivers)" : ""}${settings ? "\n  - WinDinghy's settings and logs" : ""}\nYour Mac files, exported backups and the Windows ISO are not touched.\nRe-run with --yes to do it. Options: --purge-cache  --purge-settings`);
         return;
     }
-    const progress = (pct, title) => { if (args.includes("--progress")) console.log(`PROGRESS:${Math.round(pct)}:${title}`); };
+    const progress = makeProgress(args.includes("--progress"));
     progress(3, "Preparing…");
     if (VM.isRunning(cfg)) { say("Shutting down Windows..."); progress(8, "Shutting down Windows…"); VM.stop(cfg, 60); }
     if (VM.exists(cfg) || VM.isRunning(cfg)) { say("Removing the Windows VM..."); progress(40, "Deleting the Windows disk…"); VM.destroy(cfg); }
@@ -1699,13 +1513,7 @@ async function cmdUninstall(cfg, args) {
     if (user) keychainDelete(user);
     // Launchers: only folders that carry our app.json
     progress(70, "Removing app launchers…");
-    try {
-        for (const n of fs.readdirSync(cfg.appsDir)) {
-            const d = path.join(cfg.appsDir, n);
-            if (n.endsWith(".app") && fs.existsSync(path.join(d, "Contents", "Resources", "app.json"))) fs.rmSync(d, { recursive: true, force: true });
-        }
-        try { fs.rmdirSync(cfg.appsDir); } catch {}
-    } catch {}
+    L.removeLaunchers(cfg.appsDir);
     if (cache) { progress(85, "Removing cached downloads…"); try { fs.rmSync(VM.cacheDir(), { recursive: true, force: true }); } catch {} }
     progress(95, "Finishing…");
     if (settings) { try { fs.rmSync(CONFIG_DIR, { recursive: true, force: true }); } catch {} }
@@ -2224,9 +2032,6 @@ async function cmdOpenSettings(cfg, page) {
 // `dinghy setup` and `dinghy fix` drive the guest through utmctl's guest agent
 // (see guest.mjs), so a new user doesn't paste commands into Windows.
 
-function say(msg) { console.log(msg); }
-function stepSay(msg) { console.log(`==> ${msg}`); }
-
 // Backend-aware hints (UTM VM you run yourself vs the VM WinDinghy manages).
 const isQemu = cfg => cfg.vmBackend === "qemu";
 const startHint = cfg => isQemu(cfg) ? "Start it with: dinghy vm start" : "Start it in UTM";
@@ -2264,15 +2069,6 @@ function chooseVm(cfg) {
     }
     if (cfg.vmName !== vm.name) { cfg.vmName = vm.name; saveConfig(cfg); }
     return vm;
-}
-
-async function waitFor(fn, seconds, everyMs = 3000) {
-    const end = Date.now() + seconds * 1000;
-    while (Date.now() < end) {
-        if (await fn()) return true;
-        await new Promise(r => setTimeout(r, everyMs));
-    }
-    return false;
 }
 
 // Choose the guest address that sits on one of this Mac's vmnet bridges.
@@ -2499,9 +2295,6 @@ async function cmdFix(cfg, args) {
     say(fixed ? `\nApplied ${fixed} fix${fixed === 1 ? "" : "es"}. Try your app again.` : `\nNothing needed fixing.`);
 }
 
-// Delegates to the repo-root `update` launcher (installed from the tracked
-// host/dinghy-update.sh on first run) rather than reimplementing the git
-// logic here — see host/dinghy-update.sh for why it's a separate script.
 function cmdLogin(cfg) {
     if (!cfg.username) throw new Error("Set your Windows login first: dinghy config username <domain\\user>");
     const pw = promptPassword(winUser(cfg));
@@ -2509,17 +2302,10 @@ function cmdLogin(cfg) {
     console.log(keychainSet(winUser(cfg), pw) ? `Saved the password for ${winUser(cfg)} in your Keychain.` : "Could not save to the Keychain.");
 }
 
-function cmdUpdate() {
-    const launcher = path.join(PROJECT_ROOT, "update");
-    const tracked = path.join(PROJECT_ROOT, "host", "dinghy-update.sh");
-    if (!fs.existsSync(launcher)) {
-        if (!fs.existsSync(tracked)) throw new Error("Updater script missing — this isn't a full windinghy checkout.");
-        fs.copyFileSync(tracked, launcher);
-        fs.chmodSync(launcher, 0o755);
-    }
-    const r = spawnSync(launcher, [], { stdio: "inherit" });
-    process.exit(r.status ?? 1);
-}
+// Delegates to the repo-root `update` launcher (installed from the tracked
+// host/dinghy-update.sh on first run) rather than reimplementing the git
+// logic here — see host/dinghy-update.sh for why it's a separate script.
+function cmdUpdate() { runUpdater(PROJECT_ROOT); }
 
 // Settings that point WinDinghy at something other than its own managed VM.
 const ADVANCED_KEYS = ["host", "apiPort", "rdpPort", "client", "nativeBin", "vmBackend"];
@@ -2537,10 +2323,8 @@ function cmdConfig(cfg, key, value) {
     }
     if (ADVANCED_KEYS.includes(key)) needAdvanced(cfg, `Changing "${key}"`);
     const enums = { vmAutoStart: ["on", "off"], vmOnQuit: ["save", "shutdown", "keep"], vmIdleAction: ["off", "pause", "save", "shutdown"] };
-    if (enums[key] && !enums[key].includes(value)) throw new Error(`${key} must be one of: ${enums[key].join(", ")}`);
-    const num = POWER_NUMBERS.find(([k]) => k === key);
-    if (num && (!/^\d+$/.test(value) || Number(value) < num[1] || Number(value) > num[2])) throw new Error(`${key} must be a whole number from ${num[1]} to ${num[2]}`);
-    cfg[key] = (/^\d+$/.test(value) && (key.endsWith("Port") || num)) ? Number(value) : value;
+    checkConfigValue(key, value, { enums, numbers: POWER_NUMBERS });
+    cfg[key] = coerceConfigValue(key, value, POWER_NUMBERS);
     saveConfig(cfg);
     console.log(`${key} = ${cfg[key]}`);
     if (key === "advanced" && value === "on") {
@@ -2575,19 +2359,7 @@ try {
         case "folders":     await cmdFolders(cfg, rest); break;
         case "open-settings": await cmdOpenSettings(cfg, rest[0]); break;
         case "permissions": {
-            let ok;
-            if (rest.includes("--prompt")) {
-                const quiet = rest.includes("--quiet");
-                const stamp = path.join(CONFIG_DIR, "app-management-prompted");
-                // Background callers (app start) don't nag: at most one prompt a day.
-                if (quiet && !probeAppManagement(cfg) && (() => { try { return Date.now() - fs.statSync(stamp).mtimeMs < 86400000; } catch { return false; } })()) {
-                    ok = false;
-                } else {
-                    if (quiet && !probeAppManagement(cfg)) { try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); fs.writeFileSync(stamp, ""); } catch {} }
-                    ok = await ensureAppManagement(cfg, { wait: !quiet });
-                }
-            } else ok = probeAppManagement(cfg);
-            if (!rest.includes("--quiet")) console.log(ok ? "App Management: allowed" : "App Management: BLOCKED (System Settings > Privacy & Security > App Management > WinDinghy)");
+            const ok = await appMgmt.command(cfg.appsDir, rest);
             process.exit(ok ? 0 : 1);
         }
         case "setup":       await cmdSetup(cfg, rest); break;

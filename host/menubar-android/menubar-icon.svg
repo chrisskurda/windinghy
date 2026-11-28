@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- RoboDinghy menu-bar glyph (template image: one colour, macOS tints it). The dinghy from the app
+       icon: mainsail, jib, a mast with an antenna and signal arcs at the top, and a curved hull. -->
+  <g fill="#000">
+    <!-- mainsail -->
+    <path d="M13.3 6.4 Q16.4 10.4 20.4 15.4 L13.3 15.4 Z"/>
+    <!-- jib -->
+    <path d="M10.7 8.2 L10.7 15.4 L4.6 15.4 Z"/>
+    <!-- mast -->
+    <rect x="11.45" y="3.6" width="1.1" height="13" rx="0.55"/>
+    <!-- antenna tip -->
+    <circle cx="12" cy="3.6" r="1.25"/>
+    <!-- hull -->
+    <path d="M2.6 17.6 H21.4 C20.4 20.6 17.2 22.2 12 22.2 C6.8 22.2 3.6 20.6 2.6 17.6 Z"/>
+  </g>
+  <!-- signal arcs -->
+  <g fill="none" stroke="#000" stroke-width="1.1" stroke-linecap="round">
+    <path d="M14.1 1.5 A3 3 0 0 1 14.1 5.7"/>
+    <path d="M9.9 1.5 A3 3 0 0 0 9.9 5.7"/>
+  </g>
+</svg>

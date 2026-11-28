@@ -1,0 +1,9 @@
+#!/bin/bash
+# RoboDinghy CLI. Resolve symlinks so `robodinghy` works when linked into a PATH directory.
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+  D="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ "$SRC" != /* ]] && SRC="$D/$SRC"
+done
+exec node "$(cd -P "$(dirname "$SRC")" && pwd)/host/android/robodinghy.mjs" "$@"

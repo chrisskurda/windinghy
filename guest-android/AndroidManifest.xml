@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RoboDinghy helper: an Instrumentation-only package (no activities, so it
+     never appears in the app drawer). Run by the host as
+     am instrument -w -e size 256 app.robodinghy.helper/.Export -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="app.robodinghy.helper"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="34" />
+
+    <!-- Package visibility (Android 11+): only launcher activities. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="RoboDinghy Helper"
+        android:hasCode="true"
+        android:allowBackup="false" />
+
+    <instrumentation
+        android:name=".Export"
+        android:targetPackage="app.robodinghy.helper"
+        android:label="RoboDinghy app export" />
+</manifest>

@@ -19,12 +19,13 @@ struct WBConfig {
     var appsDir = NSString(string: "~/Applications/WinDinghy").expandingTildeInPath
     var vmDir = NSString(string: "~/Library/Application Support/WinDinghy/vm").expandingTildeInPath
 
-    static let path = NSString(string: "~/.config/windinghy/config.json").expandingTildeInPath
+    static let file = JSONConfigFile(path: "~/.config/windinghy/config.json")
+    static var path: String { file.path }
 
     static func load() -> WBConfig {
         var c = WBConfig()
-        guard let data = FileManager.default.contents(atPath: path),
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return c }
+        let json = file.dict()
+        guard !json.isEmpty else { return c }
         if let v = json["host"] as? String, !v.isEmpty { c.host = v }
         if let v = json["apiPort"] as? Int { c.apiPort = v }
         if let v = json["rdpPort"] as? Int { c.rdpPort = v }
@@ -40,32 +41,22 @@ struct WBConfig {
     }
 
     // Read-modify-write a single key, preserving everything dinghy has stored.
-    static func update(_ key: String, _ value: Any) {
-        let fm = FileManager.default
-        try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        var json = ((try? JSONSerialization.jsonObject(with: fm.contents(atPath: path) ?? Data())) as? [String: Any]) ?? [:]
-        json[key] = value
-        if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
-    }
+    static func update(_ key: String, _ value: Any) { file.set(key, value) }
 }
 
-func findNode() -> String? {
-    for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"] {
-        if FileManager.default.isExecutableFile(atPath: p) { return p }
-    }
-    return nil
-}
-
-func findDinghy() -> String? {
-    if let env = ProcessInfo.processInfo.environment["DINGHY_PATH"] { return env }
-    let candidates = [
+// The dinghy CLI (findNode, CLIRunner: host/common/swift/CLIRunner.swift).
+let dinghyCLI = CLIRunner(config: CLIConfig(
+    scriptEnvVar: "DINGHY_PATH",
+    scriptCandidates: [
         NSString(string: "~/windinghy/host/dinghy.mjs").expandingTildeInPath,
         Bundle.main.bundlePath + "/Contents/Resources/dinghy.mjs",
-    ]
-    return candidates.first { FileManager.default.fileExists(atPath: $0) }
-}
+    ]))
+
+func findDinghy() -> String? { dinghyCLI.config.findScript() }
+
+// Self-update (host/common/swift/Updater.swift).
+let dinghyUpdater = Updater(config: UpdaterConfig(
+    scriptEnvVar: "DINGHY_PATH", defaultCheckout: "~/windinghy", trackedScript: "host/dinghy-update.sh"))
 
 func tcpOpen(host: String, port: Int, timeoutSec: Int32 = 3) -> Bool {
     let sock = socket(AF_INET, SOCK_STREAM, 0)
@@ -169,16 +160,13 @@ final class RunWindow: NSObject, NSWindowDelegate {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
+        // streamOutput (CLIRunner.swift) delivers everything dinghy printed before finish(): its last
+        // lines (an `Error: …`) arrive right as it exits.
+        streamOutput(of: p, pipe: pipe, onText: { [weak self] s in
             DispatchQueue.main.async { self?.append(s) }
-        }
-        p.terminationHandler = { [weak self] proc in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async { self?.finish(proc.terminationStatus) }
-        }
+        }, done: { [weak self] status in self?.finish(status) })
         do { try p.run(); process = p } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
             append("Couldn't run dinghy: \(error.localizedDescription)\n")
             finish(1)
         }
@@ -221,7 +209,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     var updating = false
     var runWindow: RunWindow?
     var searchQuery = ""
-    var searchField: NSSearchField?
+    var searchField: MenuSearchField?
     var searchItem: NSMenuItem?
     var currentAppItems: [NSMenuItem] = []
     var lastDiscover = Date.distantPast
@@ -232,25 +220,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
 
     // Runs `dinghy <args>` and hands back everything it printed.
     func runDinghyCapture(_ args: [String], input: String? = nil, done: @escaping (Int32, String) -> Void) {
-        guard let node = findNode(), let dinghy = findDinghy() else { return }
-        DispatchQueue.global().async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: node)
-            p.arguments = [dinghy] + args
-            let pipe = Pipe()
-            p.standardOutput = pipe; p.standardError = Pipe()
-            let inPipe = Pipe()
-            p.standardInput = inPipe
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            p.environment = env
-            do { try p.run() } catch { DispatchQueue.main.async { done(1, "") }; return }
-            if let input { inPipe.fileHandleForWriting.write(Data(input.utf8)) }
-            try? inPipe.fileHandleForWriting.close()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            DispatchQueue.main.async { done(p.terminationStatus, String(data: data, encoding: .utf8) ?? "") }
-        }
+        dinghyCLI.capture(args, input: input, done: done)
     }
 
     func refreshSnapshots() {
@@ -647,10 +617,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     func menuNeedsUpdate(_ menu: NSMenu) {
         rebuildMenu()
         poll()
-        // Route typing to the search box instead of menu type-select
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let field = self.searchField else { return }
-            field.window?.makeFirstResponder(field)
+    }
+
+    // Route typing to the search box. Without focus there, the menu's own type-select takes the keys,
+    // and that only matches the rows already showing (Favorites), never the apps under All Apps.
+    // The field also claims focus itself when it lands in the menu's window (MenuSearchField); these
+    // retries cover a menu window that is reused or slow to appear. Timers run in .common modes
+    // because the menu tracks in its own run-loop mode.
+    func menuWillOpen(_ menu: NSMenu) {
+        for delay in [0.0, 0.05, 0.2] {
+            let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in self?.searchField?.claimFocus() }
+            RunLoop.main.add(t, forMode: .common)
         }
     }
 
@@ -714,7 +691,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // would drop keyboard focus.
     func makeSearchItem() -> NSMenuItem {
         if let item = searchItem { return item }
-        let field = NSSearchField(frame: NSRect(x: 12, y: 1, width: 212, height: 26))
+        let field = MenuSearchField(frame: NSRect(x: 12, y: 1, width: 212, height: 26))
         field.placeholderString = "Search Windows apps"
         field.delegate = self
         field.sendsSearchStringImmediately = true
@@ -864,25 +841,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // it async with a timeout and report via notification.
     // Runs `dinghy <args>` in the background and reports the last line it printed when it finishes.
     func runDinghyBackground(_ args: [String], done: @escaping (Int32, String) -> Void) {
-        guard let node = findNode(), let dinghy = findDinghy() else {
+        if !dinghyCLI.background(args, done: done) {
             notify("Can't find node or dinghy.mjs — run `dinghy \(args.joined(separator: " "))` from a terminal instead.")
-            return
-        }
-        DispatchQueue.global().async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: node)
-            p.arguments = [dinghy] + args
-            let pipe = Pipe()
-            p.standardOutput = pipe; p.standardError = pipe
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            p.environment = env
-            do { try p.run() } catch { DispatchQueue.main.async { done(1, error.localizedDescription) }; return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            let text = String(data: data, encoding: .utf8) ?? ""
-            let last = text.split(separator: "\n").last.map(String.init) ?? ""
-            DispatchQueue.main.async { done(p.terminationStatus, last) }
         }
     }
 
@@ -1018,26 +978,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
     // is gitignored on purpose — see that file for why. This finds the real
     // checkout (not the dinghy.mjs copy bundled into Contents/Resources,
     // which has no .git and can't be updated).
-    func findRepoRoot() -> String? {
-        let fm = FileManager.default
-        if let env = ProcessInfo.processInfo.environment["DINGHY_PATH"] {
-            let root = ((env as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
-            if fm.fileExists(atPath: root + "/.git") { return root }
-        }
-        let candidate = NSString(string: "~/windinghy").expandingTildeInPath
-        return fm.fileExists(atPath: candidate + "/.git") ? candidate : nil
-    }
+    func findRepoRoot() -> String? { dinghyUpdater.findRepoRoot() }
 
-    func installedUpdateLauncher(root: String) -> String? {
-        let fm = FileManager.default
-        let launcherPath = root + "/update"
-        if fm.fileExists(atPath: launcherPath) { return launcherPath }
-        let trackedPath = root + "/host/dinghy-update.sh"
-        guard fm.fileExists(atPath: trackedPath) else { return nil }
-        try? fm.copyItem(atPath: trackedPath, toPath: launcherPath)
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcherPath)
-        return fm.fileExists(atPath: launcherPath) ? launcherPath : nil
-    }
+    func installedUpdateLauncher(root: String) -> String? { dinghyUpdater.installedUpdateLauncher(root: root) }
 
     @objc func checkForUpdates() {
         guard !updating else { return }
@@ -1051,33 +994,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSSearchFiel
         }
         updating = true
         AppStore.shared.updateStatus = "Checking for updates…"
-        DispatchQueue.global().async { [weak self] in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/bash")
-            p.arguments = [launcherPath]
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-            env["GIT_TERMINAL_PROMPT"] = "0"
-            env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
-            p.environment = env
-            let out = Pipe()
-            p.standardOutput = out; p.standardError = out
-            do { try p.run() } catch {
-                DispatchQueue.main.async { self?.updating = false; AppStore.shared.updateStatus = nil; self?.showUpdateResult("Couldn't run the updater", error.localizedDescription) }
-                return
-            }
-            let data = out.fileHandleForReading.readDataToEndOfFile()   // read to EOF: no lost output
-            p.waitUntilExit()
-            let text = String(data: data, encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.updating = false
-                AppStore.shared.updateStatus = nil
-                let tail = text.split(separator: "\n").suffix(8).joined(separator: "\n")
-                if text.contains("Already up to date") { self.showUpdateResult("WinDinghy is up to date", tail) }
-                else if p.terminationStatus == 0 { self.showUpdateResult("WinDinghy was updated", tail) }
-                else { self.showUpdateResult("Update didn't finish", tail.isEmpty ? "Unknown error." : tail) }
-            }
+        dinghyUpdater.run(launcher: launcherPath) { [weak self] status, text, launchError in
+            guard let self else { return }
+            self.updating = false
+            AppStore.shared.updateStatus = nil
+            if let launchError { self.showUpdateResult("Couldn't run the updater", launchError.localizedDescription); return }
+            let tail = text.split(separator: "\n").suffix(8).joined(separator: "\n")
+            if text.contains("Already up to date") { self.showUpdateResult("WinDinghy is up to date", tail) }
+            else if status == 0 { self.showUpdateResult("WinDinghy was updated", tail) }
+            else { self.showUpdateResult("Update didn't finish", tail.isEmpty ? "Unknown error." : tail) }
         }
     }
 
@@ -1397,6 +1322,20 @@ app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()
 
+
+/// The menu's search box. It takes keyboard focus as soon as it is placed in the menu's window, so typing
+/// filters every app instead of falling through to the menu's type-select.
+final class MenuSearchField: NSSearchField {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        claimFocus()
+    }
+
+    func claimFocus() {
+        guard let w = window, currentEditor() == nil else { return }
+        w.makeFirstResponder(self)
+    }
+}
 
 /// A menu row for one Windows app. Menus ignore right-clicks on plain rows, so this draws its own row
 /// (matching the system look) and handles the mouse itself.

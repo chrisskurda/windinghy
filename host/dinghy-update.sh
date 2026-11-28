@@ -75,6 +75,14 @@ CHANGED="$(git diff --name-only "$OLD_HEAD" HEAD)"
 NEW_VER="$(version)"
 sync_launcher  # the pull may have changed host/dinghy-update.sh itself
 
+# ---------------------------------------------------------------------------------------------------
+# FROZEN PREFIX: every byte above this comment must stay exactly as it is (2380 bytes, as of v0.3.0).
+# The running launcher is overwritten in place by the sync_launcher call just above, and bash keeps
+# reading the new file from the same byte offset it had reached in the old one; with an unchanged
+# prefix that offset is always the start of this comment. Everything below sits in one { ...; exit; }
+# group, so bash parses all of it before running any of it and later edits here can't shift it.
+# ---------------------------------------------------------------------------------------------------
+{
 echo "Updated v$OLD_VER -> v$NEW_VER"
 
 # A new FreeRDP patch or build recipe means the bundled client must be rebuilt first.
@@ -85,18 +93,34 @@ if [ -d vendor/freerdp ] && echo "$CHANGED" | grep -qE '^(patches/|scripts/build
     fi
 fi
 
-if [ -f "host/menubar/build.sh" ]; then
-    echo "Rebuilding the menu-bar app..."
-    RUNNING=0
-    if pgrep -qf windinghy-menubar; then RUNNING=1; fi
-    if ! ( cd host/menubar && ./build.sh ) >/tmp/dinghy-update-build.log 2>&1; then
-        echo "Menu-bar rebuild failed — see /tmp/dinghy-update-build.log" >&2
-    elif [ "$RUNNING" = "1" ]; then
-        pkill -f windinghy-menubar 2>/dev/null || true
+# Rebuild each installed menu-bar app (a small per-app table; /bin/bash is 3.2, so no arrays of rows):
+#   rebuild_app <what> <failed-label> <build dir> <process name> <installed .app> <build log> <relaunched msg>
+# prints "Rebuilding the <what>...", then "<failed-label> rebuild failed — see <log>" or, if the app
+# was running, relaunches it and prints <relaunched msg>. WinDinghy's row is today's behaviour;
+# RoboDinghy's runs only when it is installed or configured on this Mac (and its build script exists).
+rebuild_app() {
+    local what="$1" failed="$2" dir="$3" proc="$4" app="$5" log="$6" relaunched="$7"
+    [ -f "$dir/build.sh" ] || return 0
+    echo "Rebuilding the $what..."
+    local running=0
+    if pgrep -qf "$proc"; then running=1; fi
+    if ! ( cd "$dir" && ./build.sh ) >"$log" 2>&1; then
+        echo "$failed rebuild failed — see $log" >&2
+    elif [ "$running" = "1" ]; then
+        pkill -f "$proc" 2>/dev/null || true
         sleep 1
-        open "$HOME/Applications/WinDinghy.app"
-        echo "Menu-bar app relaunched."
+        open "$app"
+        echo "$relaunched"
     fi
+}
+
+rebuild_app "menu-bar app" "Menu-bar" host/menubar windinghy-menubar \
+    "$HOME/Applications/WinDinghy.app" /tmp/dinghy-update-build.log "Menu-bar app relaunched."
+if [ -d "$HOME/Applications/RoboDinghy.app" ] || [ -d "$HOME/.config/robodinghy" ]; then
+    rebuild_app "RoboDinghy menu-bar app" "RoboDinghy menu-bar" host/menubar-android robodinghy-menubar \
+        "$HOME/Applications/RoboDinghy.app" /tmp/robodinghy-update-build.log "RoboDinghy menu-bar app relaunched."
 fi
 
 echo "Done."
+exit
+}

@@ -119,13 +119,8 @@ final class ToolsStore: ObservableObject {
     @Published var storageBusy: String? = nil
     @Published var storageMessage: String? = nil
 
-    private func json(_ text: String) -> Any? {
-        // the CLI may print progress lines first; take the last line that parses
-        for line in text.split(separator: "\n").reversed() {
-            if let d = String(line).data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) { return o }
-        }
-        return nil
-    }
+    // the CLI may print progress lines first; take the last line that parses (host/common/swift)
+    private func json(_ text: String) -> Any? { lastJSON(text) }
 
     private func pkgs(_ any: Any?) -> [Pkg] {
         ((any as? [[String: Any]]) ?? []).compactMap { d in
@@ -282,45 +277,20 @@ final class ToolsStore: ObservableObject {
     /// Runs `dinghy uninstall --progress` and shows its PROGRESS lines. When it finishes, the main window
     /// notices there's no VM and goes back to the setup wizard.
     func uninstall(cache: Bool, settings: Bool, done: @escaping (Bool) -> Void) {
-        guard let node = findNode(), let dinghy = findDinghy() else { storageMessage = "Can't find node or dinghy.mjs."; return }
-        var args = [dinghy, "uninstall", "--yes", "--progress"]
+        guard dinghyCLI.resolve() != nil else { storageMessage = "Can't find node or dinghy.mjs."; return }
+        var args = ["uninstall", "--yes", "--progress"]
         if cache { args.append("--purge-cache") }
         if settings { args.append("--purge-settings") }
         removePct = 1; removeTitle = "Preparing…"; storageMessage = nil
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: node)
-        p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        p.environment = env
-        let pipe = Pipe()
-        p.standardOutput = pipe; p.standardError = pipe
-        var buffer = ""
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let chunk = String(data: d, encoding: .utf8) else { return }
-            buffer += chunk
-            while let nl = buffer.firstIndex(of: "\n") {
-                let line = String(buffer[buffer.startIndex..<nl])
-                buffer = String(buffer[buffer.index(after: nl)...])
-                if line.hasPrefix("PROGRESS:") {
-                    let parts = line.dropFirst(9).split(separator: ":", maxSplits: 1).map(String.init)
-                    if parts.count == 2, let pct = Double(parts[0]) {
-                        DispatchQueue.main.async { self?.removePct = pct; self?.removeTitle = parts[1] }
-                    }
-                }
-            }
-        }
-        p.terminationHandler = { [weak self] proc in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async {
-                self?.removePct = nil
-                self?.storageMessage = proc.terminationStatus == 0 ? nil : "Removing Windows didn't finish. Run: dinghy uninstall --yes"
-                AppStore.shared.refresh()
-                done(proc.terminationStatus == 0)
-            }
-        }
-        do { try p.run() } catch { removePct = nil; storageMessage = error.localizedDescription }
+        let err = dinghyCLI.progress(args, onProgress: { [weak self] pct, title in
+            self?.removePct = pct; self?.removeTitle = title
+        }, done: { [weak self] status in
+            self?.removePct = nil
+            self?.storageMessage = status == 0 ? nil : "Removing Windows didn't finish. Run: dinghy uninstall --yes"
+            AppStore.shared.refresh()
+            done(status == 0)
+        })
+        if let err { removePct = nil; storageMessage = err.localizedDescription }
     }
 
     private func run(_ title: String, _ args: [String], _ ok: String) {

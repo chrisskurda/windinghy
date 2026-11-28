@@ -1,0 +1,14 @@
+{
+  "robodinghy": "0.1.0",
+  "emulator": { "tested": "37.3.10", "note": "Google's Android Emulator, run headless (-no-window -gpu host)." },
+  "systemImage": {
+    "aosp": { "api": "37.0", "revision": "6", "id": "system-images;android-37.0;default;arm64-v8a", "validated": "2026-11-28" },
+    "play": { "api": "37.0", "revision": "7", "id": "system-images;android-37.0;google_apis_playstore;arm64-v8a", "validated": "2026-11-27" }
+  },
+  "scrcpy": { "tested": "5.0.1", "note": "Per-app windows: --new-display --flex-display --start-app." },
+  "adb": { "tested": "37.0.3-16887417" },
+  "helper": { "tested": "built", "package": "app.robodinghy.helper" },
+  "fdroid": { "signerSha256": "43238d512c1e5eb2d6569f4a3afbf5523418b82e0a3ed1552770abb9a9c9ccab" },
+  "macos": { "tested": ["27"], "minimum": "14" },
+  "neverSet": ["persist.wm.debug.desktop_experience_devopts", "persist.wm.debug.desktop_mode_enforce_device_restrictions"]
+}

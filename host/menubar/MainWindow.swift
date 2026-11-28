@@ -96,28 +96,7 @@ struct DetailView: View {
 
 // MARK: - shared bits
 
-/// Small observable value holder. `@State` is a macro in recent SDKs and needs the SwiftUI macro plugin,
-/// which isn't in the Command Line Tools; `@StateObject` + this box needs nothing extra.
-final class Box<T>: ObservableObject {
-    @Published var value: T
-    init(_ v: T) { value = v }
-}
-
-struct Card<Content: View>: View {
-    var padding: CGFloat = 16
-    @ViewBuilder var content: Content
-    var body: some View {
-        content
-            .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary))
-    }
-}
-
-struct StatusDot: View {
-    let ok: Bool
-    var body: some View { Circle().fill(ok ? Color.green : Color.secondary.opacity(0.5)).frame(width: 8, height: 8) }
-}
+// Box, Card, StatusDot, Metric, SliderRow, KV, Row and note() live in host/common/swift/UIKit.swift.
 
 // MARK: - Apps
 
@@ -258,19 +237,6 @@ struct MachineView: View {
     }
 }
 
-struct Metric: View {
-    let label: String, value: String, fraction: Double
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(label).font(.system(size: 12)).foregroundStyle(.secondary)
-                Text(value).font(.system(size: 22, weight: .semibold))
-                ProgressView(value: min(max(fraction, 0), 1)).progressViewStyle(.linear)
-            }
-        }
-    }
-}
-
 // MARK: - Resources
 
 struct ResourcesView: View {
@@ -375,11 +341,6 @@ struct PowerSection: View {
         .onAppear(perform: load)
     }
 
-    @ViewBuilder private func note(_ text: String, warn: Bool) -> some View {
-        Label(text, systemImage: warn ? "exclamationmark.triangle.fill" : "info.circle")
-            .font(.system(size: 12)).foregroundStyle(warn ? Color.orange : Color.secondary)
-    }
-
     private func load() {
         autoStartBox.value = ConfigFile.bool("vmAutoStart", true)
         delayBox.value = ConfigFile.int("vmStartDelaySec", 30)
@@ -391,32 +352,6 @@ struct PowerSection: View {
         var dir = URL(fileURLWithPath: store.cfg.vmDir)
         while !FileManager.default.fileExists(atPath: dir.path) && dir.path != "/" { dir.deleteLastPathComponent() }
         if let b = (try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage { freeGBBox.value = Double(b) / 1_073_741_824 }
-    }
-}
-
-struct SliderRow: View {
-    let title: String
-    @Binding var value: Int
-    let range: ClosedRange<Int>
-    let step: Int
-    let display: String
-    let note: String
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack { Text(title); Spacer(); Text(display).foregroundStyle(.secondary) }
-            Slider(value: Binding(get: { Double(value) }, set: { value = Int($0) }),
-                   in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step))
-            Text(note).font(.system(size: 12)).foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct KV: View {
-    let k: String, v: String
-    init(_ k: String, _ v: String) { self.k = k; self.v = v }
-    var body: some View {
-        HStack { Text(k); Spacer(); Text(v).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary) }
     }
 }
 
@@ -499,17 +434,6 @@ struct ReadOnlyToggle: View {
     var body: some View {
         Toggle("Read-only: Windows can look but not change", isOn: Binding(get: { store.isReadOnly(share) }, set: { store.setReadOnly(share, $0) }))
             .toggleStyle(.checkbox).font(.system(size: 12)).padding(.leading, 18)
-    }
-}
-
-struct Row: View {
-    let title: String, detail: String
-    init(_ t: String, _ d: String) { title = t; detail = d }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-            Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
-        }
     }
 }
 

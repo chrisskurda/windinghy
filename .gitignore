@@ -12,3 +12,6 @@ host/menubar/windinghy-menubar
 
 # Design handoff archive (its contents live in docs/design/main-window)
 /macOS Hypervisor UI Design.zip
+
+# RoboDinghy helper APK build output (guest-android/build.sh) incl. debug keystore
+/guest-android/build/
